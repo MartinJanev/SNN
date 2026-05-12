@@ -1,0 +1,24 @@
+# Quick prototype configuration - for fast iteration and testing
+# Run with: python main.py --config config_quick.yaml
+
+experiment:
+  language: "anbn"
+
+training:
+  train_pairs: 50
+  test_pairs: 25
+  train_min_n: 1
+  train_max_n: 3
+  test_min_n: 4
+  test_max_n: 6
+  epochs: 2
+  learning_rate: 0.01
+  seed: 42
+
+model:
+  hidden_size: 16
+  beta: 0.85
+
+device:
+  device: null
+

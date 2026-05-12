@@ -1,0 +1,24 @@
+# Comprehensive experiment configuration - for thorough testing
+# Run with: python main.py --config config_comprehensive.yaml
+
+experiment:
+  language: "anbn"
+
+training:
+  train_pairs: 1000
+  test_pairs: 300
+  train_min_n: 1
+  train_max_n: 5
+  test_min_n: 6
+  test_max_n: 12
+  epochs: 20
+  learning_rate: 0.005
+  seed: 42
+
+model:
+  hidden_size: 32
+  beta: 0.9
+
+device:
+  device: null
+

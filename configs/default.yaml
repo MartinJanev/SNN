@@ -1,0 +1,46 @@
+# Default experiment configuration for SNN formal language learning
+# Modify these values to change defaults for all runs
+# CLI arguments will override these settings
+
+experiment:
+  # Language to test: anbn, palindrome, paren, anbncn, equal_ab, ends_with_abb, repeat_ab, ww, prime_a, alternating
+  language: "ends_with_abb"
+
+  # Optional: override the default alphabet for the language (usually not needed)
+  # alphabet: "ab"
+
+training:
+  # Number of positive/negative pairs to generate for training
+  train_pairs: 500
+
+  # Number of positive/negative pairs to generate for testing
+  test_pairs: 1000
+
+  # Training set: range of n values (complexity/length parameter)
+  train_min_n: 50
+  train_max_n: 250
+
+  # Test set: range of n values (usually higher than training to test generalization)
+  test_min_n: 60
+  test_max_n: 200
+
+  # Number of training epochs
+  epochs: 10
+
+  # Learning rate for Adam optimizer
+  learning_rate: 0.01
+
+  # Random seed for reproducibility
+  seed: 42
+
+model:
+  # Hidden layer size for both RNN and SNN
+  hidden_size: 32
+
+  # Decay factor for SNN leaky integrate-and-fire neurons (0 < beta < 1)
+  # Higher beta = longer memory, lower beta = faster decay
+  beta: 0.85
+
+device:
+  # Compute device: "cpu", "cuda", "mps", or null to auto-detect
+  device: null
