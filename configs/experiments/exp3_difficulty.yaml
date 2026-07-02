@@ -1,0 +1,22 @@
+experiment:
+  language: "anbn"
+  output_dir: "outputs/experiments/exp3_difficulty"
+  stratified_test: false
+  difficulty_test: true
+  pairs_per_difficulty_cell: 5
+
+training:
+  train_pairs: 250
+  train_min_n: 1
+  train_max_n: 10
+  epochs: 5
+  learning_rate: 0.01
+  seed: 42
+
+model:
+  hidden_size: 32
+  beta: 0.85
+  learn_beta: true
+
+device:
+  device: null

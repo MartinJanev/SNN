@@ -1,57 +1,74 @@
 # SNN Formal Language Learning
 
-An experimental framework comparing RNN and Spiking Neural Network (SNN) models on learning formal languages.
+Compare GRU (RNN) and Spiking Neural Network (SNN) models as recognizers of formal languages — following the setup in *Training Neural Networks as Recognizers of Formal Languages*.
 
 ## Goal
-To investigate whether spiking neural networks (which process symbols as temporal spikes) can learn formal languages as effectively as classic RNNs, and to compare their abilities to generalize to longer, unseen sequences.
+
+Investigate whether SNNs (which process symbols as temporal spikes) can learn formal languages and generalize to longer sequences, compared to a classical RNN baseline.
+
+## Languages
+
+Three context-free focus languages:
+
+1. **anbn** — a^n b^n
+2. **balanced_parens** — balanced parentheses (Dyck language)
+3. **palindrome** — even-length palindromes over {a, b, c}
 
 ## Quick Start
+
 ```bash
 pip install -r requirements.txt
-python main.py
+python -m formal_language_snn --config configs/config.yaml
 ```
 
-## Languages Supported
-1. **anbn**: a^n b^n (context-free)
-2. **anbncn**: a^n b^n c^n (context-sensitive)
-3. **palindrome**: Even-length palindromes
-4. **paren**: Balanced parentheses
-5. **equal_ab**: Equal counts of 'a' and 'b'
-6. **ends_with_abb**: Strings ending with 'abb'
-7. **repeat_ab**: (ab)^n repetition
-8. **ww**: w concatenated with w (non-context-free)
-9. **prime_a**: a^p where p is prime
-10. **alternating**: No two consecutive identical symbols
+Override config values:
 
-## Configuration System
-Instead of passing many arguments, experiment parameters are loaded from YAML files. You can find these in the `configs/` directory:
-- `configs/default.yaml` - Default parameters
-- `configs/quick.yaml` - Fast testing
-- `configs/comprehensive.yaml` - Harder evaluation bounds
-- `configs/anbncn.yaml` - Context-sensitive language defaults
-
-You can override any setting using CLI flags:
 ```bash
-python main.py --language palindrome --epochs 10 --train-pairs 500
-python main.py --config configs/quick.yaml --language paren
+python -m formal_language_snn --set experiment.language=palindrome --set training.epochs=10
 ```
 
-## Convenience Scripts
-Easily run common experiments:
+## Experiment Plan
+
+Structured experiments use **10 seeds** by default (mean ± std). Use `--pilot` for a single-seed smoke test.
+
+| Experiment | What it measures |
+|------------|------------------|
+| **Exp 1 — Length** | Accuracy vs word-length buckets: 1–10, 11–20, 21–40, 41–80, 81–160 |
+| **Exp 2 — Beta** | SNN membrane decay β sweep (fixed β, `learn_beta=false`) |
+| **Exp 3 — Difficulty** | Hard vs easy negative examples per language |
+
 ```bash
-# Windows
-run_experiment.bat quick
-run_experiment.bat all-quick   # Tests all languages
-
-# MacOS / Linux
-./run_experiment.sh quick
-./run_experiment.sh all-quick
+python scripts/exp1_length.py --plot
+python scripts/exp2_beta_sweep.py --plot
+python scripts/exp3_difficulty.py --plot
 ```
 
-## How It Works
-1. Config resolves from YAML + CLI.
-2. Dataset generation creates pos/neg examples for training (small `n`) and testing (large `n`).
-3. An RNN and a leaky SNN are built.
-4. Words are fed as one-hot impulses (spikes).
-5. The models are evaluated on testing word-length buckets to check generalization.
+Plot or export aggregated JSON:
 
+```bash
+python scripts/plot_experiments.py --experiment exp1 --input outputs/experiments/exp1_length/exp1_length_anbn_seedagg.json
+python scripts/aggregate_experiments.py --input outputs/experiments/exp1_length/exp1_length_anbn_seedagg.json
+```
+
+Convenience wrapper:
+
+```bash
+./scripts/run_experiment.sh default   # single run from configs/config.yaml
+./scripts/run_experiment.sh all       # all three languages
+```
+
+## Configuration
+
+- [`configs/config.yaml`](configs/config.yaml) — default single-run settings
+- [`configs/experiments/`](configs/experiments/) — presets for exp1, exp2, exp3
+
+Results are written as JSON under `outputs/`.
+
+## Models
+
+- **ClassicRNN** — GRU + MLP classifier (final hidden state)
+- **SpikingNet** — two-layer LIF network; `SF.ce_rate_loss()` for training, spike sum for inference
+
+## Utilities
+
+- [`printAllFiles.sh`](printAllFiles.sh) — dump repo source to a text file (skips `.venv`, `outputs`, etc.)

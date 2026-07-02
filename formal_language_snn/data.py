@@ -2,11 +2,47 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import random
-from typing import List, Iterable
+from typing import Iterable, List, Tuple
 
 import torch
 
-from . import languages
+from .languages import get_language as _get_language
+from .languages import list_languages as _list_languages
+
+EXPERIMENT_LANGUAGES = ("anbn", "balanced_parens", "palindrome")
+
+LENGTH_BUCKETS: Tuple[Tuple[int, int], ...] = (
+    (1, 10),
+    (11, 20),
+    (21, 40),
+    (41, 80),
+    (81, 160),
+)
+
+NEGATIVE_DIFFICULTY = {
+    "anbn": {0: "hard", 1: "hard", 2: "easy", 3: "easy", 4: "easy"},
+    "palindrome": {0: "hard", 1: "easy", 2: "easy", 3: "easy", 4: "hard"},
+    "balanced_parens": {0: "easy", 1: "easy", 2: "hard", 3: "easy", 4: "easy"},
+}
+
+
+def get_language(name: str):
+    return _get_language(name)
+
+
+def list_languages():
+    return _list_languages()
+
+
+def word_length(n: int) -> int:
+    return 2 * n
+
+
+def length_bucket(word_len: int) -> str:
+    for lo, hi in LENGTH_BUCKETS:
+        if lo <= word_len <= hi:
+            return f"{lo}-{hi}"
+    return "other"
 
 
 @dataclass(frozen=True)
@@ -15,7 +51,30 @@ class Sample:
     label: int
     a_count: int
     b_count: int
+    negative_strategy: int | None = None
+    difficulty: str | None = None
 
+
+def generate_pair_with_meta(
+    language: str,
+    n: int,
+    rng: random.Random,
+    strategy: int | None = None,
+) -> Tuple[Sample, Sample]:
+    lang = get_language(language)
+    pos_word, neg_word = lang.generate_pair(rng, n, strategy=strategy)
+    neg_strategy = strategy if strategy is not None else rng.randrange(5)
+    difficulty = NEGATIVE_DIFFICULTY.get(language, {}).get(neg_strategy % 5)
+    pos = Sample(word=pos_word, label=1, a_count=n, b_count=n)
+    neg = Sample(
+        word=neg_word,
+        label=0,
+        a_count=n,
+        b_count=n,
+        negative_strategy=neg_strategy % 5,
+        difficulty=difficulty,
+    )
+    return pos, neg
 
 
 def generate_dataset(
@@ -26,23 +85,6 @@ def generate_dataset(
     language: str = "anbn",
     alphabet: Iterable[str] | None = None,
 ) -> List[Sample]:
-    """Generate a balanced dataset (positive + negative) for the selected formal language.
-
-    Supported languages and their default alphabets:
-    - "anbn": language a^n b^n (context-free, counting constraint)
-    - "anbncn": language a^n b^n c^n (context-sensitive, three-way counting)
-    - "palindrome": even-length palindromes (context-free)
-    - "paren": balanced parentheses (context-free, classic example)
-    - "equal_ab": strings with equal counts of 'a' and 'b' in any order (context-free)
-    - "ends_with_abb": strings ending with 'abb' (regular language)
-    - "repeat_ab": (ab)^n repetition (regular language)
-    - "ww": strings of form w || w (non-context-free)
-    - "prime_a": a^p where p is prime >= n (non-regular unary language)
-    - "alternating": no two consecutive identical symbols (regular language)
-
-    This returns 2 * num_pairs samples (each pair: one positive, one negative), shuffled.
-    """
-
     if num_pairs <= 0:
         raise ValueError("num_pairs must be positive")
     if min_n <= 0:
@@ -51,47 +93,91 @@ def generate_dataset(
         raise ValueError("max_n must be >= min_n")
 
     rng = random.Random(seed)
-    dataset: List[Sample] = []
-
-    # Normalize language name and get generator + default alphabet
     language = language.lower()
-    try:
-        generator = languages.get_generator(language)
-        if alphabet is None:
-            alphabet = languages.get_alphabet(language)
-    except ValueError as e:
-        raise ValueError(str(e)) from e
+    lang = get_language(language)
+    if alphabet is None:
+        alphabet = lang.alphabet
 
+    dataset: List[Sample] = []
     for _ in range(num_pairs):
         n = rng.randint(min_n, max_n)
+        pos, neg = generate_pair_with_meta(language, n, rng)
+        dataset.extend([pos, neg])
 
-        # Call generator with rng, n, and alphabet keyword argument (if supported)
-        pos, neg = generator(rng, n, alphabet=alphabet)
+    rng.shuffle(dataset)
+    return dataset
 
-        dataset.append(Sample(word=pos, label=1, a_count=n, b_count=n))
-        dataset.append(Sample(word=neg, label=0, a_count=n, b_count=n))
+
+def generate_stratified_dataset(
+    pairs_per_bucket: int,
+    seed: int | None = None,
+    language: str = "anbn",
+    alphabet: Iterable[str] | None = None,
+) -> List[Sample]:
+    rng = random.Random(seed)
+    language = language.lower()
+    lang = get_language(language)
+    if alphabet is None:
+        alphabet = lang.alphabet
+
+    dataset: List[Sample] = []
+    for lo, hi in LENGTH_BUCKETS:
+        min_n = max(1, (lo + 1) // 2)
+        max_n = hi // 2
+        for _ in range(pairs_per_bucket):
+            n = rng.randint(min_n, max_n)
+            pos, neg = generate_pair_with_meta(language, n, rng)
+            dataset.extend([pos, neg])
+
+    rng.shuffle(dataset)
+    return dataset
+
+
+def generate_difficulty_dataset(
+    pairs_per_difficulty_cell: int,
+    seed: int | None = None,
+    language: str = "anbn",
+    alphabet: Iterable[str] | None = None,
+) -> List[Sample]:
+    rng = random.Random(seed)
+    language = language.lower()
+    lang = get_language(language)
+    if alphabet is None:
+        alphabet = lang.alphabet
+
+    difficulty_map = NEGATIVE_DIFFICULTY.get(language, {})
+    strategies_by_difficulty: dict[str, list[int]] = {"hard": [], "easy": []}
+    for strategy, difficulty in difficulty_map.items():
+        strategies_by_difficulty.setdefault(difficulty, []).append(strategy)
+
+    dataset: List[Sample] = []
+    for difficulty, strategies in strategies_by_difficulty.items():
+        if not strategies:
+            continue
+        for _ in range(pairs_per_difficulty_cell):
+            for strategy in strategies:
+                n = rng.randint(1, 10)
+                pos, neg = generate_pair_with_meta(language, n, rng, strategy=strategy)
+                neg = Sample(
+                    word=neg.word,
+                    label=0,
+                    a_count=n,
+                    b_count=n,
+                    negative_strategy=strategy,
+                    difficulty=difficulty,
+                )
+                dataset.extend([pos, neg])
 
     rng.shuffle(dataset)
     return dataset
 
 
 def word_to_tensor(word: str, alphabet: Iterable[str] | None = None) -> torch.Tensor:
-    """Convert a word to a spike tensor with shape [time_steps, batch_size=1, features=len(alphabet)].
-
-    If alphabet is None, it is inferred from the symbols present in the word (sorted), but for
-    consistent model input sizes it's recommended to provide a fixed alphabet.
-    """
-
     if not word:
         raise ValueError("word must not be empty")
 
     symbols = list(word)
-    if alphabet is None:
-        alphabet_list = sorted(set(symbols))
-    else:
-        alphabet_list = list(alphabet)
-
-    # build one-hot encodings according to alphabet_list
+    alphabet_list = sorted(set(symbols)) if alphabet is None else list(alphabet)
     idx_map = {s: i for i, s in enumerate(alphabet_list)}
 
     spike_sequence = []
