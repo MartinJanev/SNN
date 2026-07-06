@@ -15,8 +15,8 @@ sys.path.insert(0, str(ROOT))
 from formal_language_snn.cli import config_from_dict, load_config
 from formal_language_snn.data import EXPERIMENT_LANGUAGES
 from formal_language_snn.paths import PROJECT_ROOT
-from formal_language_snn.plotting import plot_difficulty_breakdown
-from formal_language_snn.training import aggregate_results, run_multiseed_experiment
+from formal_language_snn.plotting import plot_difficulty_breakdown, plot_difficulty_breakdown_panel
+from formal_language_snn.training import build_seedagg_payload, run_multiseed_experiment
 
 
 def main() -> None:
@@ -34,7 +34,9 @@ def main() -> None:
     out_root = PROJECT_ROOT / "outputs/experiments/exp3_difficulty"
     out_root.mkdir(parents=True, exist_ok=True)
 
+    payloads: list[dict] = []
     for language in args.languages:
+        print(f"=== exp3 {language} ({num_seeds} seeds) ===", flush=True)
         config = replace(
             base_config,
             language=language,
@@ -42,22 +44,28 @@ def main() -> None:
             difficulty_test=True,
         )
         records = run_multiseed_experiment(config, num_seeds, args.seed_base)
-        agg = aggregate_results(records)
-        payload = {
-            "experiment": "exp3_difficulty",
-            "language": language,
-            "num_seeds": num_seeds,
-            "metrics": agg.metrics,
-        }
+        payload = build_seedagg_payload(
+            experiment="exp3_difficulty",
+            config=config,
+            records=records,
+            num_seeds=num_seeds,
+            seed_base=args.seed_base,
+        )
         out_file = out_root / f"exp3_difficulty_{language}_seedagg.json"
         out_file.write_text(json.dumps(payload, indent=2, sort_keys=True))
         print(f"Wrote {out_file}")
+        payloads.append(payload)
         if args.plot:
             plot_difficulty_breakdown(
                 payload,
                 out_root / f"exp3_difficulty_{language}.png",
                 title=f"Exp3: {language}",
             )
+
+    if args.plot and len(payloads) > 1:
+        panel_path = out_root / "exp3_difficulty_all.png"
+        plot_difficulty_breakdown_panel(payloads, panel_path)
+        print(f"Wrote {panel_path}")
 
 
 if __name__ == "__main__":

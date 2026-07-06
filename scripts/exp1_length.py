@@ -15,8 +15,8 @@ sys.path.insert(0, str(ROOT))
 from formal_language_snn.cli import config_from_dict, load_config
 from formal_language_snn.data import EXPERIMENT_LANGUAGES
 from formal_language_snn.paths import PROJECT_ROOT
-from formal_language_snn.plotting import plot_length_accuracy
-from formal_language_snn.training import aggregate_results, run_multiseed_experiment
+from formal_language_snn.plotting import plot_length_accuracy, plot_length_accuracy_panel
+from formal_language_snn.training import build_seedagg_payload, run_multiseed_experiment
 
 
 def main() -> None:
@@ -34,7 +34,9 @@ def main() -> None:
     out_root = PROJECT_ROOT / "outputs/experiments/exp1_length"
     out_root.mkdir(parents=True, exist_ok=True)
 
+    payloads: list[dict] = []
     for language in args.languages:
+        print(f"=== exp1 {language} ({num_seeds} seeds) ===", flush=True)
         config = replace(
             base_config,
             language=language,
@@ -42,20 +44,25 @@ def main() -> None:
             difficulty_test=False,
         )
         records = run_multiseed_experiment(config, num_seeds, args.seed_base)
-        agg = aggregate_results(records)
-        payload = {
-            "experiment": "exp1_length",
-            "language": language,
-            "num_seeds": num_seeds,
-            "seed_base": args.seed_base,
-            "metrics": agg.metrics,
-        }
+        payload = build_seedagg_payload(
+            experiment="exp1_length",
+            config=config,
+            records=records,
+            num_seeds=num_seeds,
+            seed_base=args.seed_base,
+        )
         out_file = out_root / f"exp1_length_{language}_seedagg.json"
         out_file.write_text(json.dumps(payload, indent=2, sort_keys=True))
         print(f"Wrote {out_file}")
+        payloads.append(payload)
         if args.plot:
             plot_path = out_root / f"exp1_length_{language}.png"
             plot_length_accuracy(payload, plot_path, title=f"Exp1: {language}")
+
+    if args.plot and len(payloads) > 1:
+        panel_path = out_root / "exp1_length_all.png"
+        plot_length_accuracy_panel(payloads, panel_path)
+        print(f"Wrote {panel_path}")
 
 
 if __name__ == "__main__":

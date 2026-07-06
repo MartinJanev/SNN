@@ -1,4 +1,4 @@
-"""Language: Even-Length Palindromes over {a, b, c}."""
+"""Language: Even-Length Palindromes over a–z."""
 
 from __future__ import annotations
 
@@ -10,12 +10,12 @@ from . import FormalLanguage, REGISTRY
 
 class EvenPalindrome(FormalLanguage):
     name = "palindrome"
-    description = "Even-length palindromes over {a,b,c}: s = reverse(s) (Context-Free)"
+    description = "Even-length palindromes over a–z: s = reverse(s) (Context-Free)"
     chomsky_class = "Context-Free"
 
     @property
     def alphabet(self) -> List[str]:
-        return ["a", "b", "c"]
+        return [chr(i) for i in range(97, 123)]  # a-z
 
     def is_member(self, word: str) -> bool:
         if not word or len(word) % 2 != 0:

@@ -111,5 +111,6 @@ def main(argv: list[str] | None = None) -> None:
     results = run_experiment(config)
     print(f"RNN accuracy: {results.rnn_accuracy * 100:.2f}%")
     print(f"SNN accuracy: {results.snn_accuracy * 100:.2f}%")
+    print(f"LSTM accuracy: {results.lstm_accuracy * 100:.2f}%")
     if results.output_path:
         print(f"Saved: {results.output_path}")

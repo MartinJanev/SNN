@@ -91,5 +91,5 @@ def list_languages() -> Dict[str, str]:
 
 
 from . import anbn  # noqa: E402, F401
-from . import balancesd_parens  # noqa: E402, F401
+from . import balanced_parens  # noqa: E402, F401
 from . import palindrome  # noqa: E402, F401

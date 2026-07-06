@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from collections import defaultdict
 import json
 import math
@@ -23,7 +23,9 @@ from .data import (
     word_length,
     word_to_tensor,
 )
-from .models import ClassicRNN, SpikingNet
+from .models import ClassicRNN, SpikingNet, ClassicLSTM
+
+MODEL_KINDS = ("rnn", "snn", "lstm")
 
 
 @dataclass(frozen=True)
@@ -56,15 +58,28 @@ class ExperimentResults:
     history: Dict[str, List[float]]
     rnn_accuracy: float
     snn_accuracy: float
+    lstm_accuracy: float
     rnn_accuracy_by_length: Dict[int, float]
     snn_accuracy_by_length: Dict[int, float]
+    lstm_accuracy_by_length: Dict[int, float]
     rnn_accuracy_by_bucket: Dict[str, float] = field(default_factory=dict)
     snn_accuracy_by_bucket: Dict[str, float] = field(default_factory=dict)
+    lstm_accuracy_by_bucket: Dict[str, float] = field(default_factory=dict)
     rnn_hard_neg_accuracy: float | None = None
     rnn_easy_neg_accuracy: float | None = None
     snn_hard_neg_accuracy: float | None = None
     snn_easy_neg_accuracy: float | None = None
+    lstm_hard_neg_accuracy: float | None = None
+    lstm_easy_neg_accuracy: float | None = None
     output_path: str | None = None
+
+
+def config_to_dict(config: ExperimentConfig) -> Dict[str, Any]:
+    payload = asdict(config)
+    alphabet = payload.get("alphabet")
+    if alphabet is not None:
+        payload["alphabet"] = list(alphabet)
+    return payload
 
 
 @dataclass
@@ -90,11 +105,13 @@ def _predict_snn(model: SpikingNet, inputs: torch.Tensor) -> torch.Tensor:
     return model(inputs).sum(dim=0)
 
 
-def _predict(model, inputs: torch.Tensor, model_kind: str) -> int:
+def _predict(model, inputs: torch.Tensor, model_kind: str) -> int | float | bool | Any:
     if model_kind == "rnn":
         return model(inputs).argmax(dim=1).item()
     if model_kind == "snn":
         return _predict_snn(model, inputs).argmax(dim=1).item()
+    if model_kind == "lstm":
+        return model(inputs).argmax(dim=1).item()
     raise ValueError(f"Unknown model_kind: {model_kind}")
 
 
@@ -180,46 +197,40 @@ def _write_experiment_record(config, results, alphabet, output_dir) -> str | Non
         "language": config.language,
         "alphabet": list(alphabet),
         "device": results.device,
-        "config": {
-            "train_pairs": config.train_pairs,
-            "test_pairs": config.test_pairs,
-            "train_min_n": config.train_min_n,
-            "train_max_n": config.train_max_n,
-            "test_min_n": config.test_min_n,
-            "test_max_n": config.test_max_n,
-            "hidden_size": config.hidden_size,
-            "beta": config.beta,
-            "learn_beta": config.learn_beta,
-            "lr": config.lr,
-            "epochs": config.epochs,
-            "seed": config.seed,
-            "stratified_test": config.stratified_test,
-            "difficulty_test": config.difficulty_test,
-            "pairs_per_bucket": config.pairs_per_bucket,
-            "pairs_per_difficulty_cell": config.pairs_per_difficulty_cell,
-        },
+        "models": list(MODEL_KINDS),
+        "config": config_to_dict(config),
         "history": results.history,
-        "test_accuracy": {"rnn": results.rnn_accuracy, "snn": results.snn_accuracy},
+        "test_accuracy": {
+            kind: getattr(results, f"{kind}_accuracy") for kind in MODEL_KINDS
+        },
         "accuracy_by_length": {
-            "rnn": results.rnn_accuracy_by_length,
-            "snn": results.snn_accuracy_by_length,
+            kind: getattr(results, f"{kind}_accuracy_by_length") for kind in MODEL_KINDS
         },
         "accuracy_by_bucket": {
-            "rnn": results.rnn_accuracy_by_bucket,
-            "snn": results.snn_accuracy_by_bucket,
+            kind: getattr(results, f"{kind}_accuracy_by_bucket") for kind in MODEL_KINDS
         },
         "difficulty_accuracy": {
-            "rnn_hard": results.rnn_hard_neg_accuracy,
-            "rnn_easy": results.rnn_easy_neg_accuracy,
-            "snn_hard": results.snn_hard_neg_accuracy,
-            "snn_easy": results.snn_easy_neg_accuracy,
+            f"{kind}_{diff}": getattr(results, f"{kind}_{diff}_neg_accuracy")
+            for kind in MODEL_KINDS
+            for diff in ("hard", "easy")
         },
     }
     file_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
     return str(file_path)
 
 
-def run_experiment(config: ExperimentConfig) -> ExperimentResults:
+def _format_run_header(config: ExperimentConfig) -> str:
+    parts = [
+        f"language={config.language}",
+        f"seed={config.seed}",
+        f"epochs={config.epochs}",
+    ]
+    if not config.learn_beta:
+        parts.append(f"beta={config.beta}")
+    return ", ".join(parts)
+
+
+def run_experiment(config: ExperimentConfig, *, verbose: bool = True) -> ExperimentResults:
     set_seed(config.seed)
     device = _device_name(config)
     alphabet = list(config.alphabet) if config.alphabet else get_language(config.language).alphabet
@@ -234,6 +245,9 @@ def run_experiment(config: ExperimentConfig) -> ExperimentResults:
     )
     test_data = _build_test_data(config, alphabet, config.seed + 1)
 
+    if verbose:
+        print(f"  training ({_format_run_header(config)})...", flush=True)
+
     input_size = len(alphabet)
     rnn_model = ClassicRNN(input_size=input_size, hidden_size=config.hidden_size).to(device)
     snn_model = SpikingNet(
@@ -242,18 +256,26 @@ def run_experiment(config: ExperimentConfig) -> ExperimentResults:
         beta=config.beta,
         learn_beta=config.learn_beta,
     ).to(device)
+    lstm_model = ClassicLSTM(
+        input_size=input_size,
+        hidden_size=config.hidden_size,
+    ).to(device)
 
     optimizer_rnn = torch.optim.Adam(rnn_model.parameters(), lr=config.lr)
     optimizer_snn = torch.optim.Adam(snn_model.parameters(), lr=config.lr)
+    optimizer_lstm = torch.optim.Adam(lstm_model.parameters(), lr=config.lr)
     loss_rnn_fn = nn.CrossEntropyLoss()
     loss_snn_fn = SF.ce_rate_loss()
-    history: Dict[str, List[float]] = {"rnn_loss": [], "snn_loss": []}
+    loss_lstm_fn = nn.CrossEntropyLoss()
+    history: Dict[str, List[float]] = {"rnn_loss": [], "snn_loss": [], "lstm_loss": []}
 
-    for _ in range(config.epochs):
+    for epoch in range(1, config.epochs + 1):
         rnn_model.train()
         snn_model.train()
+        lstm_model.train()
         rnn_loss_total = 0.0
         snn_loss_total = 0.0
+        lstm_loss_total = 0.0
         for sample in train_data:
             inputs = word_to_tensor(sample.word, alphabet=alphabet).to(device)
             targets = torch.tensor([sample.label], dtype=torch.long, device=device)
@@ -270,25 +292,52 @@ def run_experiment(config: ExperimentConfig) -> ExperimentResults:
             optimizer_snn.step()
             snn_loss_total += loss_snn.item()
 
+            optimizer_lstm.zero_grad()
+            loss_lstm = loss_lstm_fn(lstm_model(inputs), targets)
+            loss_lstm.backward()
+            optimizer_lstm.step()
+            lstm_loss_total += loss_lstm.item()
+
         history["rnn_loss"].append(rnn_loss_total / len(train_data))
         history["snn_loss"].append(snn_loss_total / len(train_data))
+        history["lstm_loss"].append(lstm_loss_total / len(train_data))
+        if verbose:
+            print(
+                f"    epoch {epoch}/{config.epochs}  "
+                f"rnn={history['rnn_loss'][-1]:.4f}  "
+                f"snn={history['snn_loss'][-1]:.4f}  "
+                f"lstm={history['lstm_loss'][-1]:.4f}",
+                flush=True,
+            )
 
     rnn_acc = _accuracy(rnn_model, test_data, device, "rnn", alphabet)
     snn_acc = _accuracy(snn_model, test_data, device, "snn", alphabet)
+    lstm_acc = _accuracy(lstm_model, test_data, device, "lstm", alphabet)
+
+    if verbose:
+        print(
+            f"  eval  rnn={rnn_acc:.1%}  snn={snn_acc:.1%}  lstm={lstm_acc:.1%}",
+            flush=True,
+        )
 
     results = ExperimentResults(
         device=str(device),
         history=history,
         rnn_accuracy=rnn_acc,
         snn_accuracy=snn_acc,
+        lstm_accuracy=lstm_acc,
         rnn_accuracy_by_length=_accuracy_by_length(rnn_model, test_data, device, "rnn", alphabet),
         snn_accuracy_by_length=_accuracy_by_length(snn_model, test_data, device, "snn", alphabet),
+        lstm_accuracy_by_length=_accuracy_by_length(lstm_model, test_data, device, "lstm", alphabet),
         rnn_accuracy_by_bucket=_accuracy_by_bucket(rnn_model, test_data, device, "rnn", alphabet),
         snn_accuracy_by_bucket=_accuracy_by_bucket(snn_model, test_data, device, "snn", alphabet),
+        lstm_accuracy_by_bucket=_accuracy_by_bucket(lstm_model, test_data, device, "lstm", alphabet),
         rnn_hard_neg_accuracy=_accuracy_by_difficulty(rnn_model, test_data, device, "rnn", alphabet, "hard"),
         rnn_easy_neg_accuracy=_accuracy_by_difficulty(rnn_model, test_data, device, "rnn", alphabet, "easy"),
         snn_hard_neg_accuracy=_accuracy_by_difficulty(snn_model, test_data, device, "snn", alphabet, "hard"),
         snn_easy_neg_accuracy=_accuracy_by_difficulty(snn_model, test_data, device, "snn", alphabet, "easy"),
+        lstm_hard_neg_accuracy=_accuracy_by_difficulty(lstm_model, test_data, device, "lstm", alphabet, "hard"),
+        lstm_easy_neg_accuracy=_accuracy_by_difficulty(lstm_model, test_data, device, "lstm", alphabet, "easy")
     )
     output_path = _write_experiment_record(config, results, alphabet, config.output_dir)
     return ExperimentResults(
@@ -296,29 +345,31 @@ def run_experiment(config: ExperimentConfig) -> ExperimentResults:
         history=results.history,
         rnn_accuracy=results.rnn_accuracy,
         snn_accuracy=results.snn_accuracy,
+        lstm_accuracy=results.lstm_accuracy,
         rnn_accuracy_by_length=results.rnn_accuracy_by_length,
         snn_accuracy_by_length=results.snn_accuracy_by_length,
+        lstm_accuracy_by_length=results.lstm_accuracy_by_length,
         rnn_accuracy_by_bucket=results.rnn_accuracy_by_bucket,
         snn_accuracy_by_bucket=results.snn_accuracy_by_bucket,
+        lstm_accuracy_by_bucket=results.lstm_accuracy_by_bucket,
         rnn_hard_neg_accuracy=results.rnn_hard_neg_accuracy,
         rnn_easy_neg_accuracy=results.rnn_easy_neg_accuracy,
         snn_hard_neg_accuracy=results.snn_hard_neg_accuracy,
         snn_easy_neg_accuracy=results.snn_easy_neg_accuracy,
+        lstm_hard_neg_accuracy=results.lstm_hard_neg_accuracy,
+        lstm_easy_neg_accuracy=results.lstm_easy_neg_accuracy,
         output_path=output_path,
     )
 
 
-def _result_to_dict(results: ExperimentResults) -> Dict[str, Any]:
-    return {
-        "rnn_accuracy": results.rnn_accuracy,
-        "snn_accuracy": results.snn_accuracy,
-        "rnn_accuracy_by_bucket": results.rnn_accuracy_by_bucket,
-        "snn_accuracy_by_bucket": results.snn_accuracy_by_bucket,
-        "rnn_hard_neg_accuracy": results.rnn_hard_neg_accuracy,
-        "rnn_easy_neg_accuracy": results.rnn_easy_neg_accuracy,
-        "snn_hard_neg_accuracy": results.snn_hard_neg_accuracy,
-        "snn_easy_neg_accuracy": results.snn_easy_neg_accuracy,
-    }
+def _result_to_dict(results: ExperimentResults, *, seed: int) -> Dict[str, Any]:
+    record: Dict[str, Any] = {"seed": seed}
+    for kind in MODEL_KINDS:
+        record[f"{kind}_accuracy"] = getattr(results, f"{kind}_accuracy")
+        record[f"{kind}_accuracy_by_bucket"] = getattr(results, f"{kind}_accuracy_by_bucket")
+        for diff in ("hard", "easy"):
+            record[f"{kind}_{diff}_neg_accuracy"] = getattr(results, f"{kind}_{diff}_neg_accuracy")
+    return record
 
 
 def _mean_std(values: List[float]) -> Dict[str, float]:
@@ -332,46 +383,73 @@ def _mean_std(values: List[float]) -> Dict[str, float]:
     return {"mean": mean, "std": math.sqrt(var)}
 
 
+def _aggregate_metric_keys(records: List[Dict[str, Any]]) -> List[str]:
+    keys = set()
+    for record in records:
+        keys.update(
+            key
+            for key in record
+            if key.endswith("_accuracy") and key not in {"seed"} and "_by_" not in key
+        )
+    return sorted(keys)
+
+
 def aggregate_results(records: List[Dict[str, Any]]) -> AggregatedResults:
     metrics: Dict[str, Dict[str, float]] = {}
-    keys = [
-        "rnn_accuracy",
-        "snn_accuracy",
-        "rnn_hard_neg_accuracy",
-        "rnn_easy_neg_accuracy",
-        "snn_hard_neg_accuracy",
-        "snn_easy_neg_accuracy",
-    ]
-    for key in keys:
+    for key in _aggregate_metric_keys(records):
         stats = _mean_std([r.get(key) for r in records if r.get(key) is not None])
         metrics[key] = stats
 
     bucket_keys = set()
     for record in records:
-        bucket_keys.update(record.get("rnn_accuracy_by_bucket", {}).keys())
+        for kind in MODEL_KINDS:
+            bucket_keys.update(record.get(f"{kind}_accuracy_by_bucket", {}).keys())
     for bucket in sorted(bucket_keys):
-        metrics[f"rnn_bucket_{bucket}"] = _mean_std(
-            [r.get("rnn_accuracy_by_bucket", {}).get(bucket) for r in records]
-        )
-        metrics[f"snn_bucket_{bucket}"] = _mean_std(
-            [r.get("snn_accuracy_by_bucket", {}).get(bucket) for r in records]
-        )
+        for kind in MODEL_KINDS:
+            metrics[f"{kind}_bucket_{bucket}"] = _mean_std(
+                [r.get(f"{kind}_accuracy_by_bucket", {}).get(bucket) for r in records]
+            )
 
     return AggregatedResults(num_seeds=len(records), metrics=metrics)
 
 
+def build_seedagg_payload(
+        *,
+        experiment: str,
+        config: ExperimentConfig,
+        records: List[Dict[str, Any]],
+        num_seeds: int,
+        seed_base: int,
+        **extra: Any,
+) -> Dict[str, Any]:
+    agg = aggregate_results(records)
+    return {
+        "experiment": experiment,
+        "language": config.language,
+        "num_seeds": num_seeds,
+        "seed_base": seed_base,
+        "models": list(MODEL_KINDS),
+        "config": config_to_dict(config),
+        "metrics": agg.metrics,
+        **extra,
+    }
+
+
 def run_multiseed_experiment(
-    config: ExperimentConfig,
-    num_seeds: int,
-    seed_base: int = 42,
-    quiet: bool = False,
+        config: ExperimentConfig,
+        num_seeds: int,
+        seed_base: int = 42,
+        quiet: bool = False,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     for i in range(num_seeds):
         seed = seed_base + i
         run_config = replace(config, seed=seed)
         if not quiet:
-            print(f"[seed {seed}] running {run_config.language}...")
-        results = run_experiment(run_config)
-        records.append(_result_to_dict(results))
+            print(
+                f"[{i + 1}/{num_seeds}] seed {seed}  {_format_run_header(run_config)}",
+                flush=True,
+            )
+        results = run_experiment(run_config, verbose=not quiet)
+        records.append(_result_to_dict(results, seed=seed))
     return records

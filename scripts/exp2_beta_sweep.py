@@ -15,10 +15,10 @@ sys.path.insert(0, str(ROOT))
 from formal_language_snn.cli import config_from_dict, load_config
 from formal_language_snn.data import EXPERIMENT_LANGUAGES
 from formal_language_snn.paths import PROJECT_ROOT
-from formal_language_snn.plotting import plot_beta_sweep
-from formal_language_snn.training import aggregate_results, run_multiseed_experiment
+from formal_language_snn.plotting import plot_beta_sweep, plot_beta_sweep_panel
+from formal_language_snn.training import aggregate_results, build_seedagg_payload, run_multiseed_experiment
 
-DEFAULT_BETAS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95]
+DEFAULT_BETAS = [i * 0.1 for i in range(1, 11)]  # 0.1, 0.2, ..., 1.0
 
 
 def main() -> None:
@@ -37,35 +37,46 @@ def main() -> None:
     out_root = PROJECT_ROOT / "outputs/experiments/exp2_beta"
     out_root.mkdir(parents=True, exist_ok=True)
 
+    payloads: list[dict] = []
     for language in args.languages:
-        rnn_config = replace(base_config, language=language, learn_beta=True)
-        rnn_records = run_multiseed_experiment(rnn_config, num_seeds, args.seed_base, quiet=True)
+        print(f"=== exp2 {language}: baseline ({num_seeds} seeds) ===", flush=True)
+        config = replace(base_config, language=language)
+        rnn_config = replace(config, learn_beta=True)
+        rnn_records = run_multiseed_experiment(rnn_config, num_seeds, args.seed_base)
         rnn_agg = aggregate_results(rnn_records)
 
         metrics = dict(rnn_agg.metrics)
         for beta in args.betas:
+            print(f"=== exp2 {language}: snn beta={beta} ({num_seeds} seeds) ===", flush=True)
             beta_config = replace(
-                base_config,
-                language=language,
+                config,
                 beta=beta,
                 learn_beta=False,
             )
-            snn_records = run_multiseed_experiment(beta_config, num_seeds, args.seed_base, quiet=True)
+            snn_records = run_multiseed_experiment(beta_config, num_seeds, args.seed_base)
             snn_agg = aggregate_results(snn_records)
             metrics[f"snn_beta_{beta}"] = snn_agg.metrics["snn_accuracy"]
 
-        payload = {
-            "experiment": "exp2_beta",
-            "language": language,
-            "betas": args.betas,
-            "num_seeds": num_seeds,
-            "metrics": metrics,
-        }
+        payload = build_seedagg_payload(
+            experiment="exp2_beta",
+            config=config,
+            records=rnn_records,
+            num_seeds=num_seeds,
+            seed_base=args.seed_base,
+            betas=args.betas,
+            metrics=metrics,
+        )
         out_file = out_root / f"exp2_beta_{language}_seedagg.json"
         out_file.write_text(json.dumps(payload, indent=2, sort_keys=True))
         print(f"Wrote {out_file}")
+        payloads.append(payload)
         if args.plot:
             plot_beta_sweep(payload, out_root / f"exp2_beta_{language}.png", title=f"Exp2: {language}")
+
+    if args.plot and len(payloads) > 1:
+        panel_path = out_root / "exp2_beta_all.png"
+        plot_beta_sweep_panel(payloads, panel_path)
+        print(f"Wrote {panel_path}")
 
 
 if __name__ == "__main__":
