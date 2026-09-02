@@ -4,12 +4,14 @@ experiment:
   stratified_test: false
   difficulty_test: true
   pairs_per_difficulty_cell: 5
+  difficulty_min_n: 1
+  difficulty_max_n: 10
 
 training:
   train_pairs: 500
   train_min_n: 1
   train_max_n: 100
-  epochs: 10
+  epochs: 7
   learning_rate: 0.01
   seed: 42
 

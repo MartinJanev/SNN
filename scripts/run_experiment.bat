@@ -12,7 +12,7 @@ if "%1"=="default" (
 
 if "%1"=="all" (
     echo Running all languages with configs/config.yaml...
-    for %%L in (anbn palindrome balanced_parens) do (
+    for %%L in (anbn palindrome balanced_parens reber even_a) do (
         echo.
         echo ================================
         echo Testing: %%L

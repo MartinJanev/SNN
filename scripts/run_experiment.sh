@@ -12,7 +12,7 @@ case "$1" in
     ;;
   "all")
     echo "Running all languages with configs/config.yaml..."
-    for lang in anbn palindrome balanced_parens; do
+    for lang in anbn palindrome balanced_parens reber even_a; do
       echo ""
       echo "================================"
       echo "Testing: $lang"

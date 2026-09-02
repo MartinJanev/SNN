@@ -4,3 +4,7 @@ __pycache__/
 .venv/
 .idea/
 outputs/
+.matplotlib/
+/logs/
+paper/
+.agents/

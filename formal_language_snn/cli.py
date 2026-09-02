@@ -86,6 +86,8 @@ def config_from_dict(config_dict: dict) -> ExperimentConfig:
         pairs_per_difficulty_cell=_get_nested(
             config_dict, ["experiment", "pairs_per_difficulty_cell"], 5
         ),
+        difficulty_min_n=_get_nested(config_dict, ["experiment", "difficulty_min_n"], 1),
+        difficulty_max_n=_get_nested(config_dict, ["experiment", "difficulty_max_n"], 10),
     )
 
 

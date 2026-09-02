@@ -38,8 +38,3 @@ class SpikingNet(nn.Module):
             spk2_rec.append(spk2)
 
         return torch.stack(spk2_rec, dim=0)
-
-    def predict(self, x: torch.Tensor) -> torch.Tensor:
-        with torch.no_grad():
-            spikes = self.forward(x)
-        return spikes.sum(dim=0)

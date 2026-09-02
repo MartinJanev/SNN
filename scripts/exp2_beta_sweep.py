@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 from formal_language_snn.cli import config_from_dict, load_config
 from formal_language_snn.data import EXPERIMENT_LANGUAGES
 from formal_language_snn.paths import PROJECT_ROOT
-from formal_language_snn.plotting import plot_beta_sweep, plot_beta_sweep_panel
+from formal_language_snn.plotting import plot_exp2_seedagg_files
 from formal_language_snn.training import aggregate_results, build_seedagg_payload, run_multiseed_experiment
 
 DEFAULT_BETAS = [i * 0.1 for i in range(1, 11)]  # 0.1, 0.2, ..., 1.0
@@ -37,7 +37,7 @@ def main() -> None:
     out_root = PROJECT_ROOT / "outputs/experiments/exp2_beta"
     out_root.mkdir(parents=True, exist_ok=True)
 
-    payloads: list[dict] = []
+    seedagg_paths: list[Path] = []
     for language in args.languages:
         print(f"=== exp2 {language}: baseline ({num_seeds} seeds) ===", flush=True)
         config = replace(base_config, language=language)
@@ -69,14 +69,11 @@ def main() -> None:
         out_file = out_root / f"exp2_beta_{language}_seedagg.json"
         out_file.write_text(json.dumps(payload, indent=2, sort_keys=True))
         print(f"Wrote {out_file}")
-        payloads.append(payload)
-        if args.plot:
-            plot_beta_sweep(payload, out_root / f"exp2_beta_{language}.png", title=f"Exp2: {language}")
+        seedagg_paths.append(out_file)
 
-    if args.plot and len(payloads) > 1:
-        panel_path = out_root / "exp2_beta_all.png"
-        plot_beta_sweep_panel(payloads, panel_path)
-        print(f"Wrote {panel_path}")
+    if args.plot and seedagg_paths:
+        for path in plot_exp2_seedagg_files(seedagg_paths, out_root):
+            print(f"Wrote {path}")
 
 
 if __name__ == "__main__":

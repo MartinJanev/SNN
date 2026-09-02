@@ -6,10 +6,9 @@ from typing import Iterable, List, Tuple
 
 import torch
 
-from .languages import get_language as _get_language
-from .languages import list_languages as _list_languages
+from .languages import get_language
 
-EXPERIMENT_LANGUAGES = ("anbn", "balanced_parens", "palindrome")
+EXPERIMENT_LANGUAGES = ("anbn", "balanced_parens", "palindrome", "reber", "even_a")
 
 LENGTH_BUCKETS: Tuple[Tuple[int, int], ...] = (
     (1, 10),
@@ -23,19 +22,26 @@ NEGATIVE_DIFFICULTY = {
     "anbn": {0: "hard", 1: "hard", 2: "easy", 3: "easy", 4: "easy"},
     "palindrome": {0: "hard", 1: "easy", 2: "easy", 3: "easy", 4: "hard"},
     "balanced_parens": {0: "easy", 1: "easy", 2: "hard", 3: "easy", 4: "easy"},
+    "reber": {0: "hard", 1: "hard", 2: "easy", 3: "easy", 4: "easy"},
+    "even_a": {0: "hard", 1: "hard", 2: "easy", 3: "easy", 4: "easy"},
 }
 
 
-def get_language(name: str):
-    return _get_language(name)
+def strategy_plot_order(language: str) -> list[int]:
+    difficulty_map = NEGATIVE_DIFFICULTY.get(language.lower(), {})
+    hard_ids = sorted(sid for sid, diff in difficulty_map.items() if diff == "hard")
+    easy_ids = sorted(sid for sid, diff in difficulty_map.items() if diff == "easy")
+    return hard_ids + easy_ids
 
 
-def list_languages():
-    return _list_languages()
-
-
-def word_length(n: int) -> int:
-    return 2 * n
+def strategy_difficulty_label(language: str, strategy_id: int) -> str:
+    difficulty_map = NEGATIVE_DIFFICULTY.get(language.lower(), {})
+    if strategy_id not in difficulty_map:
+        return f"S{strategy_id}"
+    diff = difficulty_map[strategy_id]
+    group = [sid for sid, tag in sorted(difficulty_map.items()) if tag == diff]
+    index = group.index(strategy_id) + 1
+    return f"{'H' if diff == 'hard' else 'E'}{index}"
 
 
 def length_bucket(word_len: int) -> str:
@@ -83,7 +89,6 @@ def generate_dataset(
     max_n: int,
     seed: int | None = None,
     language: str = "anbn",
-    alphabet: Iterable[str] | None = None,
 ) -> List[Sample]:
     if num_pairs <= 0:
         raise ValueError("num_pairs must be positive")
@@ -94,9 +99,6 @@ def generate_dataset(
 
     rng = random.Random(seed)
     language = language.lower()
-    lang = get_language(language)
-    if alphabet is None:
-        alphabet = lang.alphabet
 
     dataset: List[Sample] = []
     for _ in range(num_pairs):
@@ -112,13 +114,9 @@ def generate_stratified_dataset(
     pairs_per_bucket: int,
     seed: int | None = None,
     language: str = "anbn",
-    alphabet: Iterable[str] | None = None,
 ) -> List[Sample]:
     rng = random.Random(seed)
     language = language.lower()
-    lang = get_language(language)
-    if alphabet is None:
-        alphabet = lang.alphabet
 
     dataset: List[Sample] = []
     for lo, hi in LENGTH_BUCKETS:
@@ -137,13 +135,18 @@ def generate_difficulty_dataset(
     pairs_per_difficulty_cell: int,
     seed: int | None = None,
     language: str = "anbn",
-    alphabet: Iterable[str] | None = None,
+    min_n: int = 1,
+    max_n: int = 10,
 ) -> List[Sample]:
+    if pairs_per_difficulty_cell <= 0:
+        raise ValueError("pairs_per_difficulty_cell must be positive")
+    if min_n <= 0:
+        raise ValueError("min_n must be positive")
+    if max_n < min_n:
+        raise ValueError("max_n must be >= min_n")
+
     rng = random.Random(seed)
     language = language.lower()
-    lang = get_language(language)
-    if alphabet is None:
-        alphabet = lang.alphabet
 
     difficulty_map = NEGATIVE_DIFFICULTY.get(language, {})
     strategies_by_difficulty: dict[str, list[int]] = {"hard": [], "easy": []}
@@ -156,7 +159,7 @@ def generate_difficulty_dataset(
             continue
         for _ in range(pairs_per_difficulty_cell):
             for strategy in strategies:
-                n = rng.randint(1, 10)
+                n = rng.randint(min_n, max_n)
                 pos, neg = generate_pair_with_meta(language, n, rng, strategy=strategy)
                 neg = Sample(
                     word=neg.word,

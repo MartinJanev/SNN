@@ -75,9 +75,6 @@ class LanguageRegistry:
             raise ValueError(f"Unknown language {name!r}. Supported: {supported}")
         return self._registry[key]
 
-    def list_all(self) -> Dict[str, str]:
-        return {k: v.description for k, v in sorted(self._registry.items())}
-
 
 REGISTRY = LanguageRegistry()
 
@@ -86,10 +83,8 @@ def get_language(name: str) -> FormalLanguage:
     return REGISTRY.get(name)
 
 
-def list_languages() -> Dict[str, str]:
-    return REGISTRY.list_all()
-
-
 from . import anbn  # noqa: E402, F401
 from . import balanced_parens  # noqa: E402, F401
+from . import even_a  # noqa: E402, F401
 from . import palindrome  # noqa: E402, F401
+from . import reber  # noqa: E402, F401

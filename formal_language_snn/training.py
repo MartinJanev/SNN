@@ -7,7 +7,7 @@ import math
 import random
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -18,11 +18,10 @@ from .data import (
     generate_dataset,
     generate_difficulty_dataset,
     generate_stratified_dataset,
-    get_language,
     length_bucket,
-    word_length,
     word_to_tensor,
 )
+from .languages import get_language
 from .models import ClassicRNN, SpikingNet, ClassicLSTM
 
 MODEL_KINDS = ("rnn", "snn", "lstm")
@@ -50,6 +49,8 @@ class ExperimentConfig:
     difficulty_test: bool = False
     pairs_per_bucket: int = 50
     pairs_per_difficulty_cell: int = 5
+    difficulty_min_n: int = 1
+    difficulty_max_n: int = 10
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,12 @@ class ExperimentResults:
     snn_easy_neg_accuracy: float | None = None
     lstm_hard_neg_accuracy: float | None = None
     lstm_easy_neg_accuracy: float | None = None
+    rnn_strategy_neg_accuracy: Dict[int, float] = field(default_factory=dict)
+    snn_strategy_neg_accuracy: Dict[int, float] = field(default_factory=dict)
+    lstm_strategy_neg_accuracy: Dict[int, float] = field(default_factory=dict)
+    difficulty_counts: Dict[str, int] = field(default_factory=dict)
+    strategy_counts: Dict[int, int] = field(default_factory=dict)
+    compute_budget: Dict[str, int] = field(default_factory=dict)
     output_path: str | None = None
 
 
@@ -86,6 +93,7 @@ def config_to_dict(config: ExperimentConfig) -> Dict[str, Any]:
 class AggregatedResults:
     num_seeds: int
     metrics: Dict[str, Dict[str, float]]
+    counts: Dict[str, Dict[str, float]]
 
 
 def set_seed(seed: int) -> None:
@@ -160,20 +168,48 @@ def _accuracy_by_difficulty(model, dataset, device, model_kind, alphabet, diffic
     return _accuracy(model, subset, device, model_kind, alphabet)
 
 
-def _build_test_data(config: ExperimentConfig, alphabet, seed: int) -> List[Sample]:
+def _accuracy_by_strategy(model, dataset, device, model_kind, alphabet) -> Dict[int, float]:
+    buckets: Dict[int, list[int]] = defaultdict(lambda: [0, 0])
+    model.eval()
+    with torch.no_grad():
+        for sample in dataset:
+            if sample.label != 0 or sample.negative_strategy is None:
+                continue
+            strategy = int(sample.negative_strategy)
+            inputs = word_to_tensor(sample.word, alphabet=alphabet).to(device)
+            pred = _predict(model, inputs, model_kind)
+            buckets[strategy][1] += 1
+            buckets[strategy][0] += int(pred == sample.label)
+    return {k: c / t for k, (c, t) in sorted(buckets.items()) if t > 0}
+
+
+def _difficulty_and_strategy_counts(dataset: List[Sample]) -> Tuple[Dict[str, int], Dict[int, int]]:
+    difficulty_counts: Dict[str, int] = defaultdict(int)
+    strategy_counts: Dict[int, int] = defaultdict(int)
+    for sample in dataset:
+        if sample.label != 0:
+            continue
+        if sample.difficulty:
+            difficulty_counts[sample.difficulty] += 1
+        if sample.negative_strategy is not None:
+            strategy_counts[int(sample.negative_strategy)] += 1
+    return dict(sorted(difficulty_counts.items())), dict(sorted(strategy_counts.items()))
+
+
+def _build_test_data(config: ExperimentConfig, seed: int) -> List[Sample]:
     if config.difficulty_test:
         return generate_difficulty_dataset(
             config.pairs_per_difficulty_cell,
             seed=seed,
             language=config.language,
-            alphabet=alphabet,
+            min_n=config.difficulty_min_n,
+            max_n=config.difficulty_max_n,
         )
     if config.stratified_test:
         return generate_stratified_dataset(
             config.pairs_per_bucket,
             seed=seed,
             language=config.language,
-            alphabet=alphabet,
         )
     return generate_dataset(
         config.test_pairs,
@@ -181,7 +217,6 @@ def _build_test_data(config: ExperimentConfig, alphabet, seed: int) -> List[Samp
         config.test_max_n,
         seed=seed,
         language=config.language,
-        alphabet=alphabet,
     )
 
 
@@ -214,6 +249,13 @@ def _write_experiment_record(config, results, alphabet, output_dir) -> str | Non
             for kind in MODEL_KINDS
             for diff in ("hard", "easy")
         },
+        "strategy_accuracy": {
+            kind: getattr(results, f"{kind}_strategy_neg_accuracy")
+            for kind in MODEL_KINDS
+        },
+        "difficulty_counts": results.difficulty_counts,
+        "strategy_counts": results.strategy_counts,
+        "compute_budget": results.compute_budget,
     }
     file_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
     return str(file_path)
@@ -241,9 +283,8 @@ def run_experiment(config: ExperimentConfig, *, verbose: bool = True) -> Experim
         config.train_max_n,
         seed=config.seed,
         language=config.language,
-        alphabet=alphabet,
     )
-    test_data = _build_test_data(config, alphabet, config.seed + 1)
+    test_data = _build_test_data(config, config.seed + 1)
 
     if verbose:
         print(f"  training ({_format_run_header(config)})...", flush=True)
@@ -320,6 +361,7 @@ def run_experiment(config: ExperimentConfig, *, verbose: bool = True) -> Experim
             flush=True,
         )
 
+    difficulty_counts, strategy_counts = _difficulty_and_strategy_counts(test_data)
     results = ExperimentResults(
         device=str(device),
         history=history,
@@ -337,29 +379,22 @@ def run_experiment(config: ExperimentConfig, *, verbose: bool = True) -> Experim
         snn_hard_neg_accuracy=_accuracy_by_difficulty(snn_model, test_data, device, "snn", alphabet, "hard"),
         snn_easy_neg_accuracy=_accuracy_by_difficulty(snn_model, test_data, device, "snn", alphabet, "easy"),
         lstm_hard_neg_accuracy=_accuracy_by_difficulty(lstm_model, test_data, device, "lstm", alphabet, "hard"),
-        lstm_easy_neg_accuracy=_accuracy_by_difficulty(lstm_model, test_data, device, "lstm", alphabet, "easy")
+        lstm_easy_neg_accuracy=_accuracy_by_difficulty(lstm_model, test_data, device, "lstm", alphabet, "easy"),
+        rnn_strategy_neg_accuracy=_accuracy_by_strategy(rnn_model, test_data, device, "rnn", alphabet),
+        snn_strategy_neg_accuracy=_accuracy_by_strategy(snn_model, test_data, device, "snn", alphabet),
+        lstm_strategy_neg_accuracy=_accuracy_by_strategy(lstm_model, test_data, device, "lstm", alphabet),
+        difficulty_counts=difficulty_counts,
+        strategy_counts=strategy_counts,
+        compute_budget={
+            "epochs": config.epochs,
+            "train_samples_per_epoch": len(train_data),
+            "test_samples": len(test_data),
+            "updates_per_model": config.epochs * len(train_data),
+            "total_model_updates": config.epochs * len(train_data) * len(MODEL_KINDS),
+        },
     )
     output_path = _write_experiment_record(config, results, alphabet, config.output_dir)
-    return ExperimentResults(
-        device=results.device,
-        history=results.history,
-        rnn_accuracy=results.rnn_accuracy,
-        snn_accuracy=results.snn_accuracy,
-        lstm_accuracy=results.lstm_accuracy,
-        rnn_accuracy_by_length=results.rnn_accuracy_by_length,
-        snn_accuracy_by_length=results.snn_accuracy_by_length,
-        lstm_accuracy_by_length=results.lstm_accuracy_by_length,
-        rnn_accuracy_by_bucket=results.rnn_accuracy_by_bucket,
-        snn_accuracy_by_bucket=results.snn_accuracy_by_bucket,
-        lstm_accuracy_by_bucket=results.lstm_accuracy_by_bucket,
-        rnn_hard_neg_accuracy=results.rnn_hard_neg_accuracy,
-        rnn_easy_neg_accuracy=results.rnn_easy_neg_accuracy,
-        snn_hard_neg_accuracy=results.snn_hard_neg_accuracy,
-        snn_easy_neg_accuracy=results.snn_easy_neg_accuracy,
-        lstm_hard_neg_accuracy=results.lstm_hard_neg_accuracy,
-        lstm_easy_neg_accuracy=results.lstm_easy_neg_accuracy,
-        output_path=output_path,
-    )
+    return replace(results, output_path=output_path)
 
 
 def _result_to_dict(results: ExperimentResults, *, seed: int) -> Dict[str, Any]:
@@ -369,6 +404,14 @@ def _result_to_dict(results: ExperimentResults, *, seed: int) -> Dict[str, Any]:
         record[f"{kind}_accuracy_by_bucket"] = getattr(results, f"{kind}_accuracy_by_bucket")
         for diff in ("hard", "easy"):
             record[f"{kind}_{diff}_neg_accuracy"] = getattr(results, f"{kind}_{diff}_neg_accuracy")
+        for strategy, score in getattr(results, f"{kind}_strategy_neg_accuracy").items():
+            record[f"{kind}_strategy_{strategy}_neg_accuracy"] = score
+    for difficulty, count in results.difficulty_counts.items():
+        record[f"difficulty_{difficulty}_count"] = float(count)
+    for strategy, count in results.strategy_counts.items():
+        record[f"strategy_{strategy}_count"] = float(count)
+    for key, value in results.compute_budget.items():
+        record[f"compute_{key}"] = float(value)
     return record
 
 
@@ -381,6 +424,127 @@ def _mean_std(values: List[float]) -> Dict[str, float]:
         return {"mean": mean, "std": 0.0}
     var = sum((v - mean) ** 2 for v in clean) / (len(clean) - 1)
     return {"mean": mean, "std": math.sqrt(var)}
+
+
+def _mean_std_ci(values: List[float], z: float = 1.96) -> Dict[str, float]:
+    stats = _mean_std(values)
+    clean = [v for v in values if v is not None and not math.isnan(v)]
+    if not clean:
+        return {**stats, "n": 0, "ci_low": float("nan"), "ci_high": float("nan")}
+    if len(clean) == 1:
+        mean = clean[0]
+        return {**stats, "n": 1, "ci_low": mean, "ci_high": mean}
+    margin = z * stats["std"] / math.sqrt(len(clean))
+    return {
+        **stats,
+        "n": len(clean),
+        "ci_low": stats["mean"] - margin,
+        "ci_high": stats["mean"] + margin,
+    }
+
+
+def _safe_float_list(records: List[Dict[str, Any]], key: str) -> List[float]:
+    values: List[float] = []
+    for record in records:
+        value = record.get(key)
+        if value is None:
+            continue
+        values.append(float(value))
+    return values
+
+
+def _two_sided_sign_test(diffs: List[float]) -> float:
+    nonzero = [d for d in diffs if abs(d) > 1e-12]
+    n = len(nonzero)
+    if n == 0:
+        return 1.0
+    pos = sum(1 for d in nonzero if d > 0)
+    k = min(pos, n - pos)
+    cumulative = 0.0
+    for i in range(k + 1):
+        cumulative += math.comb(n, i)
+    p = min(1.0, 2.0 * cumulative / (2 ** n))
+    return p
+
+
+def _paired_effect_size_dz(diffs: List[float]) -> float:
+    if not diffs:
+        return float("nan")
+    mean = sum(diffs) / len(diffs)
+    if len(diffs) == 1:
+        return float("nan")
+    var = sum((d - mean) ** 2 for d in diffs) / (len(diffs) - 1)
+    sd = math.sqrt(var)
+    if sd == 0:
+        return 0.0
+    return mean / sd
+
+
+def _holm_adjust(p_values: List[float]) -> List[float]:
+    indexed = sorted(enumerate(p_values), key=lambda item: item[1])
+    m = len(p_values)
+    adjusted = [1.0] * m
+    running_max = 0.0
+    for rank, (idx, p_value) in enumerate(indexed, start=1):
+        candidate = min(1.0, (m - rank + 1) * p_value)
+        running_max = max(running_max, candidate)
+        adjusted[idx] = running_max
+    return adjusted
+
+
+def _build_inference_stats(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    ci_metrics: Dict[str, Dict[str, float]] = {}
+    for key in _aggregate_metric_keys(records):
+        ci_metrics[key] = _mean_std_ci(_safe_float_list(records, key))
+
+    comparisons: List[Dict[str, Any]] = []
+    comparison_specs: List[Tuple[str, str, str]] = [
+        ("overall", "snn", "rnn"),
+        ("overall", "snn", "lstm"),
+    ]
+    for difficulty in ("hard", "easy"):
+        comparison_specs.append((difficulty, "snn", "rnn"))
+        comparison_specs.append((difficulty, "snn", "lstm"))
+
+    raw_p_values: List[float] = []
+    for metric, lhs, rhs in comparison_specs:
+        if metric == "overall":
+            lhs_key = f"{lhs}_accuracy"
+            rhs_key = f"{rhs}_accuracy"
+        else:
+            lhs_key = f"{lhs}_{metric}_neg_accuracy"
+            rhs_key = f"{rhs}_{metric}_neg_accuracy"
+        paired: List[Tuple[float, float]] = []
+        for record in records:
+            lv = record.get(lhs_key)
+            rv = record.get(rhs_key)
+            if lv is None or rv is None:
+                continue
+            paired.append((float(lv), float(rv)))
+        diffs = [l - r for l, r in paired]
+        p_raw = _two_sided_sign_test(diffs)
+        raw_p_values.append(p_raw)
+        comparisons.append(
+            {
+                "metric": metric,
+                "lhs": lhs,
+                "rhs": rhs,
+                "n": len(paired),
+                "delta_mean": (sum(diffs) / len(diffs)) if diffs else float("nan"),
+                "effect_size_dz": _paired_effect_size_dz(diffs),
+                "p_value_sign_test": p_raw,
+            }
+        )
+
+    p_adjusted = _holm_adjust(raw_p_values) if raw_p_values else []
+    for comp, adj in zip(comparisons, p_adjusted):
+        comp["p_value_holm"] = adj
+
+    return {
+        "confidence_intervals": ci_metrics,
+        "paired_comparisons": comparisons,
+        "multiple_comparisons": {"method": "holm_bonferroni"},
+    }
 
 
 def _aggregate_metric_keys(records: List[Dict[str, Any]]) -> List[str]:
@@ -409,8 +573,16 @@ def aggregate_results(records: List[Dict[str, Any]]) -> AggregatedResults:
             metrics[f"{kind}_bucket_{bucket}"] = _mean_std(
                 [r.get(f"{kind}_accuracy_by_bucket", {}).get(bucket) for r in records]
             )
-
-    return AggregatedResults(num_seeds=len(records), metrics=metrics)
+    count_keys = sorted(
+        {
+            key
+            for record in records
+            for key in record
+            if key.endswith("_count") or key.startswith("compute_")
+        }
+    )
+    counts = {key: _mean_std(_safe_float_list(records, key)) for key in count_keys}
+    return AggregatedResults(num_seeds=len(records), metrics=metrics, counts=counts)
 
 
 def build_seedagg_payload(
@@ -431,6 +603,8 @@ def build_seedagg_payload(
         "models": list(MODEL_KINDS),
         "config": config_to_dict(config),
         "metrics": agg.metrics,
+        "counts": agg.counts,
+        "stats": _build_inference_stats(records),
         **extra,
     }
 
