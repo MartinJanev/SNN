@@ -36,6 +36,10 @@ class EvenA(FormalLanguage):
     name = "even_a"
     description = "Strings over {a,b} with an even number of a's: count(a) ≡ 0 (mod 2) (Regular)"
     chomsky_class = "Regular"
+    # 0 = single symbol flipped, 2 = uniform odd-parity string: both keep length 2n.
+    # Note: for this language the membership predicate *is* a symbol count, so length is
+    # the only surface statistic a negative can preserve. Stated in the paper's caption.
+    HARD_STRATEGIES = (0, 2)
 
     @property
     def alphabet(self) -> List[str]:
@@ -44,16 +48,23 @@ class EvenA(FormalLanguage):
     def is_member(self, word: str) -> bool:
         return word.count("a") % 2 == 0
 
+    def respects_surface_statistics(self, word: str, n: int) -> bool:
+        return len(word) == 2 * max(1, n)
+
     def generate_positive(self, rng: random.Random, n: int) -> str:
         n = max(1, n)
         return _uniform_ab_string(rng, 2 * n, "even")
 
     def generate_negative(
-        self, rng: random.Random, n: int, strategy: int | None = None
+        self,
+        rng: random.Random,
+        n: int,
+        strategy: int | None = None,
+        positive: str | None = None,
     ) -> str:
         n = max(1, n)
         strategy = rng.randrange(5) if strategy is None else strategy % 5
-        pos = self.generate_positive(rng, n)
+        pos = positive if positive is not None else self.generate_positive(rng, n)
 
         if strategy == 0:
             chars = list(pos)

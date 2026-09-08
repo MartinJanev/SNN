@@ -12,6 +12,8 @@ class AnBn(FormalLanguage):
     name = "anbn"
     description = "a^n b^n – equal number of a's followed by equal number of b's (Context-Free)"
     chomsky_class = "Context-Free"
+    # 2 = b^n a^n, 3 = shuffled a^n b^n: both keep length 2n and n a's / n b's.
+    HARD_STRATEGIES = (2, 3)
 
     @property
     def alphabet(self) -> List[str]:
@@ -27,11 +29,20 @@ class AnBn(FormalLanguage):
             return False
         return word[i:] == "b" * (len(word) - i) and i == len(word) - i
 
+    def respects_surface_statistics(self, word: str, n: int) -> bool:
+        return len(word) == 2 * max(1, n) and word.count("a") == word.count("b")
+
     def generate_positive(self, rng: random.Random, n: int) -> str:
         n = max(1, n)
         return "a" * n + "b" * n
 
-    def generate_negative(self, rng: random.Random, n: int, strategy: int | None = None) -> str:
+    def generate_negative(
+        self,
+        rng: random.Random,
+        n: int,
+        strategy: int | None = None,
+        positive: str | None = None,
+    ) -> str:
         n = max(1, n)
         strategy = rng.randrange(5) if strategy is None else strategy % 5
 
@@ -55,7 +66,7 @@ class AnBn(FormalLanguage):
             return "b" * n + "a" * n
 
         if strategy == 3:
-            chars = list("a" * n + "b" * n)
+            chars = list(positive if positive is not None else "a" * n + "b" * n)
             for _ in range(20):
                 rng.shuffle(chars)
                 candidate = "".join(chars)

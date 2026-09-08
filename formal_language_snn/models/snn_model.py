@@ -20,7 +20,7 @@ class SpikingNet(nn.Module):
     ) -> None:
         super().__init__()
         self.fc1 = nn.Linear(input_size, hidden_size)
-        self.lif1 = snn.Leaky(beta=beta, learn_beta=learn_beta)
+        self.lif1 = snn.Leaky(beta=beta, learn_beta=learn_beta) # lif - leaky integrate and fire neuron
         self.fc2 = nn.Linear(hidden_size, num_classes)
         self.lif2 = snn.Leaky(beta=beta, learn_beta=learn_beta)
 

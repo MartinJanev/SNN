@@ -7,15 +7,35 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Tuple
 
 
+#: Every language exposes exactly this many negative-mutation strategies, split into
+#: HARD_STRATEGIES and the remainder, so the hard/easy ratio is identical across the suite.
+NUM_STRATEGIES = 5
+
+
 class FormalLanguage(ABC):
     name: str
     description: str
     chomsky_class: str
 
+    #: Strategy ids whose negatives still satisfy every surface statistic that positives
+    #: share, so they can only be rejected by tracking real structure. Exactly two per
+    #: language; the remaining three are "easy" (detectable from length/symbol counts alone).
+    HARD_STRATEGIES: Tuple[int, ...] = ()
+
     @property
     @abstractmethod
     def alphabet(self) -> List[str]:
         ...
+
+    @abstractmethod
+    def respects_surface_statistics(self, word: str, n: int) -> bool:
+        """Does ``word`` satisfy the length and symbol-count statistics shared by all
+        positives at this ``n``? Negatives that do are "hard" by construction; negatives
+        that do not can be rejected by a counting heuristic and are "easy"."""
+        ...
+
+    def difficulty_of(self, strategy: int) -> str:
+        return "hard" if strategy % NUM_STRATEGIES in self.HARD_STRATEGIES else "easy"
 
     @abstractmethod
     def is_member(self, word: str) -> bool:
@@ -26,7 +46,17 @@ class FormalLanguage(ABC):
         ...
 
     @abstractmethod
-    def generate_negative(self, rng: random.Random, n: int, strategy: int | None = None) -> str:
+    def generate_negative(
+        self,
+        rng: random.Random,
+        n: int,
+        strategy: int | None = None,
+        positive: str | None = None,
+    ) -> str:
+        """Corrupt ``positive`` (the string this negative is paired with) when given.
+
+        Mutating an independently drawn positive instead leaves a length difference between
+        the two members of a pair, which a model can exploit without learning anything."""
         ...
 
     def generate_pair(
@@ -42,11 +72,9 @@ class FormalLanguage(ABC):
             )
 
         for _ in range(100):
-            neg = self.generate_negative(rng, n, strategy=strategy)
-            if not self.is_member(neg):
-                return pos, neg
-            n_try = rng.randint(1, max(1, n))
-            neg = self.generate_negative(rng, n_try, strategy=strategy)
+            # Always corrupt this pair's own positive, so the two differ structurally and
+            # not merely in length. Retries redraw the mutation, never the target length.
+            neg = self.generate_negative(rng, n, strategy=strategy, positive=pos)
             if not self.is_member(neg):
                 return pos, neg
 

@@ -116,6 +116,9 @@ class ReberGrammar(FormalLanguage):
     name = "reber"
     description = "Reber grammar – strings from a finite-state transition graph (Regular)"
     chomsky_class = "Regular"
+    # 0, 1 = one illegal transition substituted inside an otherwise well-formed walk:
+    # the string still starts with B, ends with E and has a plausible length.
+    HARD_STRATEGIES = (0, 1)
 
     @property
     def alphabet(self) -> List[str]:
@@ -131,6 +134,14 @@ class ReberGrammar(FormalLanguage):
             state = TRANSITIONS.get(state, {}).get(ch)
         return state is None
 
+    def respects_surface_statistics(self, word: str, n: int) -> bool:
+        n = max(1, n)
+        if len(word) < 2 or word[0] != "B" or word[-1] != "E":
+            return False
+        if any(ch not in ALPHABET for ch in word):
+            return False
+        return max(5, 2 * n - 2) <= len(word) <= 2 * n + 2
+
     def generate_positive(self, rng: random.Random, n: int) -> str:
         n = max(1, n)
         min_length = max(5, 2 * n - 2)
@@ -138,11 +149,17 @@ class ReberGrammar(FormalLanguage):
         return generate_reber_string(rng, min_length, max_length)
 
     def generate_negative(
-        self, rng: random.Random, n: int, strategy: int | None = None
+        self,
+        rng: random.Random,
+        n: int,
+        strategy: int | None = None,
+        positive: str | None = None,
     ) -> str:
         n = max(1, n)
         strategy = rng.randrange(5) if strategy is None else strategy % 5
-        pos = self.generate_positive(rng, n)
+        # Reber walks vary in length within [2n-2, 2n+2], so drawing a fresh positive here
+        # left the negative a different length from its pair four times in five.
+        pos = positive if positive is not None else self.generate_positive(rng, n)
 
         if strategy == 0:
             return _mutate_transition(rng, pos, middle_third=False)

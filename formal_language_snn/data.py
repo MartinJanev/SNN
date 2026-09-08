@@ -6,7 +6,7 @@ from typing import Iterable, List, Tuple
 
 import torch
 
-from .languages import get_language
+from .languages import NUM_STRATEGIES, get_language
 
 EXPERIMENT_LANGUAGES = ("anbn", "balanced_parens", "palindrome", "reber", "even_a")
 
@@ -18,12 +18,14 @@ LENGTH_BUCKETS: Tuple[Tuple[int, int], ...] = (
     (81, 160),
 )
 
+# Derived from each language's declared HARD_STRATEGIES rather than hand-maintained, so the
+# hard/easy ratio is identical (2:3) for every language by construction. A negative is "hard"
+# when it still satisfies every surface statistic that positives share -- same length, same
+# symbol counts -- and can therefore only be rejected by tracking real structure.
+# `scripts/check_symmetry.py` verifies each declaration against the strings actually generated.
 NEGATIVE_DIFFICULTY = {
-    "anbn": {0: "hard", 1: "hard", 2: "easy", 3: "easy", 4: "easy"},
-    "palindrome": {0: "hard", 1: "easy", 2: "easy", 3: "easy", 4: "hard"},
-    "balanced_parens": {0: "easy", 1: "easy", 2: "hard", 3: "easy", 4: "easy"},
-    "reber": {0: "hard", 1: "hard", 2: "easy", 3: "easy", 4: "easy"},
-    "even_a": {0: "hard", 1: "hard", 2: "easy", 3: "easy", 4: "easy"},
+    name: {s: get_language(name).difficulty_of(s) for s in range(NUM_STRATEGIES)}
+    for name in EXPERIMENT_LANGUAGES
 }
 
 
@@ -68,16 +70,19 @@ def generate_pair_with_meta(
     strategy: int | None = None,
 ) -> Tuple[Sample, Sample]:
     lang = get_language(language)
-    pos_word, neg_word = lang.generate_pair(rng, n, strategy=strategy)
-    neg_strategy = strategy if strategy is not None else rng.randrange(5)
-    difficulty = NEGATIVE_DIFFICULTY.get(language, {}).get(neg_strategy % 5)
+    # Draw the strategy here and pass it down, so the id recorded on the Sample is the
+    # mutation that was actually applied. Letting generate_negative pick its own and then
+    # drawing a second id independently made the label agree with reality 1 time in 5.
+    neg_strategy = rng.randrange(NUM_STRATEGIES) if strategy is None else strategy % NUM_STRATEGIES
+    pos_word, neg_word = lang.generate_pair(rng, n, strategy=neg_strategy)
+    difficulty = NEGATIVE_DIFFICULTY.get(language, {}).get(neg_strategy)
     pos = Sample(word=pos_word, label=1, a_count=n, b_count=n)
     neg = Sample(
         word=neg_word,
         label=0,
         a_count=n,
         b_count=n,
-        negative_strategy=neg_strategy % 5,
+        negative_strategy=neg_strategy,
         difficulty=difficulty,
     )
     return pos, neg
@@ -89,6 +94,7 @@ def generate_dataset(
     max_n: int,
     seed: int | None = None,
     language: str = "anbn",
+    max_word_len: int | None = None,
 ) -> List[Sample]:
     if num_pairs <= 0:
         raise ValueError("num_pairs must be positive")
@@ -102,8 +108,20 @@ def generate_dataset(
 
     dataset: List[Sample] = []
     for _ in range(num_pairs):
-        n = rng.randint(min_n, max_n)
-        pos, neg = generate_pair_with_meta(language, n, rng)
+        # Redraw until both members fit under the cap. Capping n instead would not be
+        # enough: n is only a target, and reber overshoots it by up to +2 while several
+        # negative strategies change the length -- so a "training" word could land in an
+        # extrapolation bucket and quietly make the length claim untestable.
+        for _attempt in range(100):
+            n = rng.randint(min_n, max_n)
+            pos, neg = generate_pair_with_meta(language, n, rng)
+            if max_word_len is None or max(len(pos.word), len(neg.word)) <= max_word_len:
+                break
+        else:
+            raise RuntimeError(
+                f"{language}: could not draw a pair under max_word_len={max_word_len} "
+                f"with n in [{min_n}, {max_n}]"
+            )
         dataset.extend([pos, neg])
 
     rng.shuffle(dataset)
@@ -137,6 +155,8 @@ def generate_difficulty_dataset(
     language: str = "anbn",
     min_n: int = 1,
     max_n: int = 10,
+    min_word_len: int | None = None,
+    max_word_len: int | None = None,
 ) -> List[Sample]:
     if pairs_per_difficulty_cell <= 0:
         raise ValueError("pairs_per_difficulty_cell must be positive")
@@ -153,14 +173,38 @@ def generate_difficulty_dataset(
     for strategy, difficulty in difficulty_map.items():
         strategies_by_difficulty.setdefault(difficulty, []).append(strategy)
 
+    # Emit the same number of pairs for "hard" as for "easy", and the same number for every
+    # strategy within a class. Iterating pairs_per_cell x |strategies| instead would make the
+    # easy column rest on 1.5x the samples of the hard column, since the split is 2:3.
+    sizes = [len(v) for v in strategies_by_difficulty.values() if v]
+    pairs_per_class = pairs_per_difficulty_cell
+    for size in sizes:
+        pairs_per_class *= size
+
     dataset: List[Sample] = []
     for difficulty, strategies in strategies_by_difficulty.items():
         if not strategies:
             continue
-        for _ in range(pairs_per_difficulty_cell):
+        pairs_per_strategy = pairs_per_class // len(strategies)
+        for _ in range(pairs_per_strategy):
             for strategy in strategies:
-                n = rng.randint(min_n, max_n)
-                pos, neg = generate_pair_with_meta(language, n, rng, strategy=strategy)
+                # Bound the realised length, not just n. Several strategies lengthen the
+                # negative (anbn varies a count by up to n//2), so an "in-range" cell drawn
+                # at n<=20 could still emit a 47-symbol word the model never trained on.
+                for _attempt in range(200):
+                    n = rng.randint(min_n, max_n)
+                    pos, neg = generate_pair_with_meta(language, n, rng, strategy=strategy)
+                    longest = max(len(pos.word), len(neg.word))
+                    shortest = min(len(pos.word), len(neg.word))
+                    if (max_word_len is None or longest <= max_word_len) and (
+                        min_word_len is None or shortest >= min_word_len
+                    ):
+                        break
+                else:
+                    raise RuntimeError(
+                        f"{language} strategy {strategy}: no pair with word length in "
+                        f"[{min_word_len}, {max_word_len}] for n in [{min_n}, {max_n}]"
+                    )
                 neg = Sample(
                     word=neg.word,
                     label=0,
