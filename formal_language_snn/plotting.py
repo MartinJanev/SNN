@@ -11,35 +11,41 @@ from .data import strategy_difficulty_label, strategy_plot_order
 
 plt.rcParams.update(
     {
-        "axes.titlesize": 13,
-        "axes.labelsize": 11,
-        "legend.fontsize": 10,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
+        "axes.titlesize": 34,
+        "axes.labelsize": 30,
+        "legend.fontsize": 28,
+        "xtick.labelsize": 28,
+        "ytick.labelsize": 28,
+        "font.size": 24,
     }
 )
 
 # Single-column paper panel (2x2, plus one centered row for a 5th language).
-PANEL_COL_WIDTH = 5.0
-PANEL_DPI = 300
+PANEL_COL_WIDTH = 7.5  # Increased from 5.0 to expand overall canvas width
+PANEL_DPI = 150
 PANEL_STYLE = {
-    "axes.titlesize": 8,
-    "axes.labelsize": 7,
-    "legend.fontsize": 6,
-    "xtick.labelsize": 6,
-    "ytick.labelsize": 6,
-    "lines.markersize": 4,
-    "lines.linewidth": 1.0,
-    "errorbar.capsize": 2,
+    "axes.titlesize": 24,
+    "axes.labelsize": 18,
+    "legend.fontsize": 16,
+    "xtick.labelsize": 16,
+    "ytick.labelsize": 16,
+    "lines.markersize": 6,
+    "lines.linewidth": 1.5,
+    "errorbar.capsize": 3,
 }
-PANEL_HSPACE = 0.10
-PANEL_WSPACE = 0.30
+# Reduce row padding to give maximum percentage of space to subplots on y-axis
+PANEL_HSPACE = 0.35  # Increased y-axis gap between subplots
+PANEL_WSPACE = 0.25
 PANEL_LEGEND_BOTTOM = 0.04
 
-MODEL_COLORS = {"rnn": "#1f77b4", "snn": "#ff7f0e", "lstm": "#2ca02c"}
-MODEL_MARKERS = {"rnn": "o", "snn": "s", "lstm": "^"}
-MODEL_LINESTYLES = {"rnn": "-", "snn": "-", "lstm": "--"}
-MODELS = ("rnn", "snn", "lstm")
+# The two spiking families share the warm end of the palette and the two gated baselines the
+# cool end, so a reader sees the mechanism split before reading the legend. Solid lines are
+# the recurrent models, dashed the feedforward SNN -- the one model with no recurrence at all.
+MODEL_COLORS = {"rnn": "#1f77b4", "snn": "#ff7f0e", "lstm": "#2ca02c", "rsnn": "#d62728"}
+MODEL_MARKERS = {"rnn": "o", "snn": "s", "lstm": "^", "rsnn": "D"}
+MODEL_LINESTYLES = {"rnn": "-", "snn": "--", "lstm": "-", "rsnn": "-"}
+MODEL_LABELS = {"rnn": "GRU", "snn": "SNN", "lstm": "LSTM", "rsnn": "RSNN"}
+MODELS = ("rnn", "snn", "lstm", "rsnn")
 DIFFICULTY_LABELS = ("hard", "easy")
 
 
@@ -87,16 +93,16 @@ def _resolve_title(aggregated: Dict, prefix: str, title: str | None, default_tit
 
 
 def _add_subtitle(fig, aggregated: Dict) -> None:
-    fig.text(0.5, 0.01, _subtitle(aggregated), ha="center", fontsize=9, color="gray")
+    fig.text(0.5, 0.01, _subtitle(aggregated), ha="center", fontsize=16, color="gray")
 
 
 def _panel_figsize(n: int) -> tuple[float, float]:
     if n <= 4:
         width = PANEL_COL_WIDTH
-        return width, width * 0.95
-    # 3-across top row needs a bit more width; 2 plot rows only.
-    width = PANEL_COL_WIDTH * 1.55
-    return width, width * 0.72
+        return width, width * 1.20
+    # 5-language panel configuration (wider base width + taller height multiplier)
+    width = PANEL_COL_WIDTH * 1.55  # ~11.6 inches total width
+    return width, width * 1.25  # Increased height multiplier to make subplots taller
 
 
 def _make_panel_axes(n: int):
@@ -205,19 +211,17 @@ def _make_regime_pair_axes(n_languages: int):
     """One row per language; left=in_range, right=extrapolation."""
     from matplotlib.gridspec import GridSpec
 
-    width = PANEL_COL_WIDTH * 2.05
-    height = max(3.0, 2.05 * n_languages)
-    fig = plt.figure(figsize=(width, height))
+    fig = plt.figure(figsize=_panel_figsize(n_languages))
     gs = GridSpec(
         n_languages,
         2,
         figure=fig,
-        hspace=0.28,
-        wspace=0.16,
-        left=0.09,
-        right=0.98,
-        top=0.90,
-        bottom=0.10,
+        hspace=PANEL_HSPACE,
+        wspace=PANEL_WSPACE,
+        left=0.07,
+        right=0.96,
+        top=0.88,
+        bottom=0.11,
     )
     axes = [[fig.add_subplot(gs[i, 0]), fig.add_subplot(gs[i, 1])] for i in range(n_languages)]
     return fig, axes
@@ -240,8 +244,8 @@ def _n_range_label(payload: Dict | None, *, fallback: str = "?") -> str:
 
 
 def _add_regime_column_headers(fig, labels: tuple[str, str]) -> None:
-    fig.text(0.31, 0.955, labels[0], ha="center", va="top", fontsize=10, fontweight="bold")
-    fig.text(0.71, 0.955, labels[1], ha="center", va="top", fontsize=10, fontweight="bold")
+    fig.text(0.31, 0.92, labels[0], ha="center", va="top", fontsize=18, fontweight="bold")
+    fig.text(0.71, 0.92, labels[1], ha="center", va="top", fontsize=18, fontweight="bold")
 
 
 
@@ -257,25 +261,46 @@ def _length_buckets(metrics: Dict) -> List[str]:
     return buckets
 
 
-def _beta_metric_key(metrics: Dict, beta: float) -> str:
+def _bar_layout(n: int, total: float = 0.8) -> tuple[float, list[float]]:
+    """Bar width and centred group offsets for ``n`` models sharing one tick."""
+    width = total / n
+    return width, [(i - (n - 1) / 2) * width for i in range(n)]
+
+
+def _present_models(metrics: Dict) -> tuple[str, ...]:
+    """Models this aggregate actually contains, in the canonical MODELS order.
+
+    A run may narrow its roster, so plotting must not assume every model is there --
+    and must not silently reorder the ones that are.
+    """
+    return tuple(m for m in MODELS if f"{m}_accuracy" in metrics)
+
+
+def _swept_models(metrics: Dict) -> tuple[str, ...]:
+    """Models that have a beta sweep in this aggregate (the spiking families)."""
+    return tuple(m for m in MODELS if any(k.startswith(f"{m}_beta_") for k in metrics))
+
+
+def _beta_metric_key(metrics: Dict, beta: float, model: str = "snn") -> str:
+    prefix = f"{model}_beta_"
     candidates = [
-        f"snn_beta_{beta}",
-        f"snn_beta_{beta:.1f}",
-        f"snn_beta_{round(beta, 1)}",
+        f"{prefix}{beta}",
+        f"{prefix}{beta:.1f}",
+        f"{prefix}{round(beta, 1)}",
     ]
     for key in candidates:
         if key in metrics:
             return key
     for key in metrics:
-        if not key.startswith("snn_beta_"):
+        if not key.startswith(prefix):
             continue
-        suffix = key.removeprefix("snn_beta_")
+        suffix = key.removeprefix(prefix)
         try:
             if abs(float(suffix) - beta) < 1e-6:
                 return key
         except ValueError:
             continue
-    raise KeyError(f"No metric for beta={beta}")
+    raise KeyError(f"No metric for {model} beta={beta}")
 
 
 def _plot_length_accuracy_ax(ax, aggregated: Dict, *, show_legend: bool = True) -> None:
@@ -283,14 +308,14 @@ def _plot_length_accuracy_ax(ax, aggregated: Dict, *, show_legend: bool = True) 
     buckets = _length_buckets(metrics)
     xs = list(range(len(buckets)))
 
-    for model in MODELS:
+    for model in _present_models(metrics):
         means = [metrics[f"{model}_bucket_{b}"]["mean"] for b in buckets]
         stds = [metrics[f"{model}_bucket_{b}"]["std"] for b in buckets]
         ax.errorbar(
             xs,
             means,
             yerr=stds,
-            label=model.upper(),
+            label=MODEL_LABELS[model],
             color=MODEL_COLORS[model],
             marker=MODEL_MARKERS[model],
             linestyle=MODEL_LINESTYLES[model],
@@ -303,7 +328,7 @@ def _plot_length_accuracy_ax(ax, aggregated: Dict, *, show_legend: bool = True) 
     ax.set_ylabel("Accuracy")
     _apply_common_axes(ax)
     if show_legend:
-        ax.legend()
+        ax.legend(fontsize=18)
 
 
 def plot_length_accuracy(
@@ -337,68 +362,57 @@ def plot_length_accuracy_panel(aggregated_list: Sequence[Dict], output_path: Pat
                 transform=ax.transAxes,
                 ha="left",
                 va="bottom",
-                fontsize=7,
+                fontsize=14,
                 fontweight="bold",
             )
             if i in bottom:
-                ax.tick_params(axis="x", rotation=0, labelsize=5.5)
+                ax.tick_params(axis="x", rotation=0, labelsize=12)
             else:
                 ax.set_xlabel("")
                 ax.tick_params(axis="x", bottom=False, labelbottom=False)
-        fig.suptitle("Accuracy vs word length", y=0.98, fontsize=9)
-        _add_panel_legend(fig, axes, ncol=3)
+        fig.suptitle("Accuracy vs word length", y=0.98, fontsize=20)
+        _add_panel_legend(fig, axes, ncol=4)
         _save_panel(fig, output_path)
 
 
 def _plot_beta_sweep_ax(ax, aggregated: Dict, *, show_legend: bool = True, short_labels: bool = False) -> None:
     betas = aggregated.get("betas", [])
     metrics = aggregated["metrics"]
-    rnn = metrics["rnn_accuracy"]["mean"]
-    lstm = metrics["lstm_accuracy"]["mean"]
-    snn_learned = metrics["snn_accuracy"]["mean"]
-    snn_means = [metrics[_beta_metric_key(metrics, b)]["mean"] for b in betas]
-    snn_stds = [metrics[_beta_metric_key(metrics, b)]["std"] for b in betas]
+    swept = _swept_models(metrics)
+    # beta has no analogue in a gated model, so those are drawn as constant reference lines
+    # from the baseline block rather than swept. They stay in the figure either way.
+    reference = tuple(m for m in _present_models(metrics) if m not in swept)
 
-    rnn_label = "RNN" if short_labels else f"RNN baseline ({rnn:.2f})"
-    lstm_label = "LSTM" if short_labels else f"LSTM baseline ({lstm:.2f})"
-    learned_label = r"SNN learned $\beta$" if short_labels else f"SNN learned β ({snn_learned:.2f})"
-    fixed_label = r"SNN fixed $\beta$" if short_labels else "SNN fixed β"
+    for model in reference:
+        mean = metrics[f"{model}_accuracy"]["mean"]
+        label = MODEL_LABELS[model] if short_labels else f"{MODEL_LABELS[model]} baseline ({mean:.2f})"
+        ax.axhline(mean, color=MODEL_COLORS[model], linestyle="--", label=label)
 
-    ax.axhline(
-        rnn,
-        color=MODEL_COLORS["rnn"],
-        linestyle="--",
-        label=rnn_label,
-    )
-    ax.axhline(
-        lstm,
-        color=MODEL_COLORS["lstm"],
-        linestyle="--",
-        label=lstm_label,
-    )
-    ax.axhline(
-        snn_learned,
-        color=MODEL_COLORS["snn"],
-        linestyle=":",
-        label=learned_label,
-    )
-    ax.errorbar(
-        betas,
-        snn_means,
-        yerr=snn_stds,
-        label=fixed_label,
-        color=MODEL_COLORS["snn"],
-        marker=MODEL_MARKERS["snn"],
-        linestyle=MODEL_LINESTYLES["snn"],
-        capsize=3,
-    )
+    for model in swept:
+        name = MODEL_LABELS[model]
+        learned = metrics[f"{model}_accuracy"]["mean"]
+        learned_label = (
+            rf"{name} learned $\beta$" if short_labels else f"{name} learned β ({learned:.2f})"
+        )
+        ax.axhline(learned, color=MODEL_COLORS[model], linestyle=":", label=learned_label)
+        ax.errorbar(
+            betas,
+            [metrics[_beta_metric_key(metrics, b, model)]["mean"] for b in betas],
+            yerr=[metrics[_beta_metric_key(metrics, b, model)]["std"] for b in betas],
+            label=rf"{name} fixed $\beta$" if short_labels else f"{name} fixed β",
+            color=MODEL_COLORS[model],
+            marker=MODEL_MARKERS[model],
+            linestyle=MODEL_LINESTYLES[model],
+            capsize=3,
+        )
+
     ax.set_xlabel("Membrane decay β")
     ax.set_ylabel("Accuracy")
     if betas:
         ax.set_xlim(min(betas), max(betas))
     _apply_common_axes(ax)
     if show_legend:
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=18)
 
 
 def plot_beta_sweep(aggregated: Dict, output_path: Path, title: str = "Beta sweep") -> None:
@@ -427,14 +441,14 @@ def plot_beta_sweep_panel(aggregated_list: Sequence[Dict], output_path: Path) ->
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
-                fontsize=7,
+                fontsize=14,
                 fontweight="bold",
             )
             if i not in bottom:
                 ax.set_xlabel("")
                 ax.tick_params(axis="x", bottom=False, labelbottom=False)
-        fig.suptitle("SNN membrane decay β sweep", y=0.98, fontsize=9)
-        _add_panel_legend(fig, axes, ncol=4)
+        fig.suptitle("Membrane decay β sweep", y=0.98, fontsize=20)
+        _add_panel_legend(fig, axes, ncol=3)
         _save_panel(fig, output_path)
 
 
@@ -443,10 +457,10 @@ def _plot_difficulty_breakdown_ax(ax, aggregated: Dict, *, show_legend: bool = T
     ci = aggregated.get("stats", {}).get("confidence_intervals", {})
     labels = list(DIFFICULTY_LABELS)
     x = np.arange(len(labels))
-    width = 0.25
-    offsets = (-width, 0.0, width)
+    present = _present_models(metrics)
+    width, offsets = _bar_layout(len(present))
 
-    for model, offset in zip(MODELS, offsets):
+    for model, offset in zip(present, offsets):
         means = [metrics[f"{model}_{d}_neg_accuracy"]["mean"] for d in labels]
         lowers = []
         uppers = []
@@ -466,7 +480,7 @@ def _plot_difficulty_breakdown_ax(ax, aggregated: Dict, *, show_legend: bool = T
             x + offset,
             means,
             width,
-            label=model.upper(),
+            label=MODEL_LABELS[model],
             color=MODEL_COLORS[model],
             yerr=[lowers, uppers] if has_err else None,
             capsize=3 if has_err else 0,
@@ -482,12 +496,12 @@ def _plot_difficulty_breakdown_ax(ax, aggregated: Dict, *, show_legend: bool = T
                     xy=(bar.get_x() + bar.get_width() / 2, 0.02),
                     ha="center",
                     va="bottom",
-                    fontsize=8,
+                    fontsize=16,
                 )
 
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
-    ax.set_ylabel("Accuracy on negatives")
+    ax.set_ylabel("Accuracy")
     ax.set_ylim(0, 1)
     ax.grid(True, axis="y", alpha=0.3)
     if show_legend:
@@ -517,10 +531,11 @@ def plot_difficulty_delta(
 ) -> None:
     metrics = aggregated["metrics"]
     ci = aggregated.get("stats", {}).get("confidence_intervals", {})
-    xs = np.arange(len(MODELS))
+    present = _present_models(metrics)
+    xs = np.arange(len(present))
     deltas = []
     yerr = [[], []]
-    for model in MODELS:
+    for model in present:
         hard_key = f"{model}_hard_neg_accuracy"
         easy_key = f"{model}_easy_neg_accuracy"
         hard = metrics[hard_key]["mean"]
@@ -542,15 +557,15 @@ def plot_difficulty_delta(
         yerr[1].append(margin)
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
-    bars = ax.bar(xs, deltas, color=[MODEL_COLORS[m] for m in MODELS], edgecolor="black", linewidth=0.5)
+    bars = ax.bar(xs, deltas, color=[MODEL_COLORS[m] for m in present], edgecolor="black", linewidth=0.5)
     ax.errorbar(xs, deltas, yerr=yerr, fmt="none", color="black", capsize=4)
     ax.axhline(0.0, color="gray", linestyle="--", linewidth=1)
     ax.set_xticks(xs)
-    ax.set_xticklabels([m.upper() for m in MODELS])
+    ax.set_xticklabels([MODEL_LABELS[m] for m in present])
     ax.set_ylabel("Easy - hard accuracy")
     ax.set_ylim(-0.2, 1.0)
     for bar, value in zip(bars, deltas):
-        ax.text(bar.get_x() + bar.get_width() / 2, value + 0.02, f"{value:.2f}", ha="center", va="bottom", fontsize=8)
+        ax.text(bar.get_x() + bar.get_width() / 2, value + 0.02, f"{value:.2f}", ha="center", va="bottom", fontsize=16)
     resolved_title = _resolve_title(aggregated, "Exp3", title, "Hard-easy negative accuracy delta")
     ax.set_title(resolved_title)
     ax.grid(True, axis="y", alpha=0.3)
@@ -573,13 +588,13 @@ def _plot_strategy_breakdown_ax(ax, aggregated: Dict, *, show_legend: bool = Tru
     if not strategy_ids:
         strategy_ids = sorted(available_ids)
     if not strategy_ids:
-        ax.text(0.5, 0.5, "No strategy metrics", ha="center", va="center")
+        ax.text(0.5, 0.5, "No strategy metrics", ha="center", va="center", fontsize=18)
         return
 
     x = np.arange(len(strategy_ids))
-    width = 0.25
-    offsets = (-width, 0.0, width)
-    for model, offset in zip(MODELS, offsets):
+    present = _present_models(metrics)
+    width, offsets = _bar_layout(len(present))
+    for model, offset in zip(present, offsets):
         means = [
             metrics.get(f"{model}_strategy_{sid}_neg_accuracy", {}).get("mean", float("nan"))
             for sid in strategy_ids
@@ -588,19 +603,19 @@ def _plot_strategy_breakdown_ax(ax, aggregated: Dict, *, show_legend: bool = Tru
             x + offset,
             means,
             width,
-            label=model.upper(),
+            label=MODEL_LABELS[model],
             color=MODEL_COLORS[model],
             edgecolor="black",
             linewidth=0.5,
         )
     ax.set_xticks(x)
     ax.set_xticklabels([strategy_difficulty_label(language, sid) for sid in strategy_ids])
-    ax.set_ylabel("Accuracy on negatives")
+    ax.set_ylabel("Accuracy")
     ax.set_xlabel("Negative strategy")
     ax.set_ylim(0, 1)
     ax.grid(True, axis="y", alpha=0.3)
     if show_legend:
-        ax.legend()
+        ax.legend(fontsize=16)
 
 
 def plot_strategy_breakdown(
@@ -625,8 +640,8 @@ def plot_difficulty_breakdown_panel(aggregated_list: Sequence[Dict], output_path
         for ax, aggregated in zip(axes, aggregated_list):
             _plot_difficulty_breakdown_ax(ax, aggregated, show_legend=False)
             ax.set_title(_default_title(aggregated, "Exp3"), pad=3)
-        fig.suptitle("Hard vs easy negative accuracy", y=0.99, fontsize=9)
-        _add_panel_legend(fig, axes, ncol=3)
+        fig.suptitle("Hard vs easy negative accuracy", y=0.99, fontsize=20)
+        _add_panel_legend(fig, axes, ncol=4)
         _save_panel(fig, output_path)
 
 
@@ -641,8 +656,8 @@ def plot_strategy_breakdown_panel(
         for ax, aggregated in zip(axes, aggregated_list):
             _plot_strategy_breakdown_ax(ax, aggregated, show_legend=False)
             ax.set_title(_default_title(aggregated, "Exp3"), pad=3)
-        fig.suptitle(suptitle, y=0.99, fontsize=9)
-        _add_panel_legend(fig, axes, ncol=3)
+        fig.suptitle(suptitle, y=0.99, fontsize=20)
+        _add_panel_legend(fig, axes, ncol=4)
         _save_panel(fig, output_path)
 
 
@@ -657,15 +672,15 @@ def plot_difficulty_breakdown_regime_panel(
     if not pairs:
         return
     # Slightly larger type than the cramped single-regime panel.
-    style = {**PANEL_STYLE, "axes.titlesize": 9, "axes.labelsize": 8, "xtick.labelsize": 7, "ytick.labelsize": 7}
+    style = {**PANEL_STYLE, "axes.titlesize": 18, "axes.labelsize": 16, "xtick.labelsize": 16, "ytick.labelsize": 16}
     with plt.rc_context(style):
         fig, axes = _make_regime_pair_axes(len(pairs))
         for row, (left, right) in enumerate(pairs):
             lang = left.get("language", "unknown")
             _plot_difficulty_breakdown_ax(axes[row][0], left, show_legend=False)
             _plot_difficulty_breakdown_ax(axes[row][1], right, show_legend=False)
-            axes[row][0].set_title(lang, pad=3)
-            axes[row][1].set_title(lang, pad=3)
+            axes[row][0].set_title(lang, pad=8, fontsize=20)
+            axes[row][1].set_title(lang, pad=8, fontsize=20)
             if row < len(pairs) - 1:
                 axes[row][0].set_xlabel("")
                 axes[row][1].set_xlabel("")
@@ -673,7 +688,7 @@ def plot_difficulty_breakdown_regime_panel(
             fig,
             (_n_range_label(pairs[0][0], fallback="In-range"), _n_range_label(pairs[0][1], fallback="Extrapolation")),
         )
-        fig.suptitle(suptitle, y=0.995, fontsize=11)
+        fig.suptitle(suptitle, y=0.98, fontsize=22)
         _add_panel_legend(fig, [axes[0][0]], ncol=3)
         _save_panel(fig, output_path)
 
@@ -688,15 +703,15 @@ def plot_strategy_breakdown_regime_panel(
     pairs = _pair_by_language(in_range_list, extrapolation_list)
     if not pairs:
         return
-    style = {**PANEL_STYLE, "axes.titlesize": 9, "axes.labelsize": 8, "xtick.labelsize": 7, "ytick.labelsize": 7}
+    style = {**PANEL_STYLE, "axes.titlesize": 18, "axes.labelsize": 16, "xtick.labelsize": 16, "ytick.labelsize": 16}
     with plt.rc_context(style):
         fig, axes = _make_regime_pair_axes(len(pairs))
         for row, (left, right) in enumerate(pairs):
             lang = left.get("language", "unknown")
             _plot_strategy_breakdown_ax(axes[row][0], left, show_legend=False)
             _plot_strategy_breakdown_ax(axes[row][1], right, show_legend=False)
-            axes[row][0].set_title(lang, pad=3)
-            axes[row][1].set_title(lang, pad=3)
+            axes[row][0].set_title(lang, pad=8)
+            axes[row][1].set_title(lang, pad=8)
             if row < len(pairs) - 1:
                 axes[row][0].set_xlabel("")
                 axes[row][1].set_xlabel("")
@@ -704,7 +719,7 @@ def plot_strategy_breakdown_regime_panel(
             fig,
             (_n_range_label(pairs[0][0], fallback="In-range"), _n_range_label(pairs[0][1], fallback="Extrapolation")),
         )
-        fig.suptitle(suptitle, y=0.995, fontsize=11)
+        fig.suptitle(suptitle, y=0.98, fontsize=22)
         _add_panel_legend(fig, [axes[0][0]], ncol=3)
         _save_panel(fig, output_path)
 

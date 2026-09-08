@@ -6,7 +6,7 @@ from pathlib import Path
 import yaml
 
 from .paths import PROJECT_ROOT
-from .training import ExperimentConfig, run_experiment
+from .training import MODEL_KINDS, ExperimentConfig, run_experiment
 
 
 def load_config(config_path: str) -> dict:
@@ -61,6 +61,15 @@ def _get_nested(config_dict: dict, keys: list[str], default):
     return cur
 
 
+def _coerce_models(raw) -> tuple[str, ...]:
+    """Accept a YAML list, or a comma-separated string from ``--set model.models=snn,rnn``."""
+    if raw is None:
+        return MODEL_KINDS
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    return tuple(str(kind).strip() for kind in raw if str(kind).strip())
+
+
 def config_from_dict(config_dict: dict) -> ExperimentConfig:
     alphabet = _get_nested(config_dict, ["experiment", "alphabet"], None)
     return ExperimentConfig(
@@ -71,12 +80,18 @@ def config_from_dict(config_dict: dict) -> ExperimentConfig:
         test_pairs=_get_nested(config_dict, ["training", "test_pairs"], 100),
         train_min_n=_get_nested(config_dict, ["training", "train_min_n"], 1),
         train_max_n=_get_nested(config_dict, ["training", "train_max_n"], 10),
+        train_max_word_len=_get_nested(config_dict, ["training", "train_max_word_len"], None),
         test_min_n=_get_nested(config_dict, ["training", "test_min_n"], 1),
         test_max_n=_get_nested(config_dict, ["training", "test_max_n"], 80),
         epochs=_get_nested(config_dict, ["training", "epochs"], 5),
+        val_fraction=_get_nested(config_dict, ["training", "val_fraction"], 0.1),
+        patience=_get_nested(config_dict, ["training", "patience"], 3),
+        grad_clip=_get_nested(config_dict, ["training", "grad_clip"], 1.0),
         lr=_get_nested(config_dict, ["training", "learning_rate"], 0.01),
         seed=_get_nested(config_dict, ["training", "seed"], 42),
         hidden_size=_get_nested(config_dict, ["model", "hidden_size"], 32),
+        models=_coerce_models(_get_nested(config_dict, ["model", "models"], None)),
+        match_capacity=_get_nested(config_dict, ["model", "match_capacity"], False),
         beta=_get_nested(config_dict, ["model", "beta"], 0.85),
         learn_beta=_get_nested(config_dict, ["model", "learn_beta"], True),
         device=_get_nested(config_dict, ["device", "device"], None),
@@ -88,6 +103,8 @@ def config_from_dict(config_dict: dict) -> ExperimentConfig:
         ),
         difficulty_min_n=_get_nested(config_dict, ["experiment", "difficulty_min_n"], 1),
         difficulty_max_n=_get_nested(config_dict, ["experiment", "difficulty_max_n"], 10),
+        difficulty_min_word_len=_get_nested(config_dict, ["experiment", "difficulty_min_word_len"], None),
+        difficulty_max_word_len=_get_nested(config_dict, ["experiment", "difficulty_max_word_len"], None),
     )
 
 
@@ -111,8 +128,7 @@ def main(argv: list[str] | None = None) -> None:
     config_dict = _apply_overrides(config_dict, args.set)
     config = config_from_dict(config_dict)
     results = run_experiment(config)
-    print(f"RNN accuracy: {results.rnn_accuracy * 100:.2f}%")
-    print(f"SNN accuracy: {results.snn_accuracy * 100:.2f}%")
-    print(f"LSTM accuracy: {results.lstm_accuracy * 100:.2f}%")
+    for kind in results.models:
+        print(f"{kind.upper()} accuracy: {results.accuracy[kind] * 100:.2f}%")
     if results.output_path:
         print(f"Saved: {results.output_path}")

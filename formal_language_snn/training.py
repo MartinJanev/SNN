@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
 from collections import defaultdict
+from itertools import combinations
 import json
 import math
 import random
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -22,9 +23,75 @@ from .data import (
     word_to_tensor,
 )
 from .languages import get_language
-from .models import ClassicRNN, SpikingNet, ClassicLSTM
+from .models import ClassicRNN, SpikingNet, ClassicLSTM, SpikingRNN
+from .models.capacity import count_parameters, matched_hidden_sizes
 
-MODEL_KINDS = ("rnn", "snn", "lstm")
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """Everything that differs between model families, one row per family.
+
+    ``build`` takes the input width, the hidden size and the config (only the spiking
+    families read anything from it). ``make_loss`` is the loss constructor. ``logits``
+    turns a forward pass into a ``[1, num_classes]`` score tensor -- the rate-coded
+    families sum their spike train over time, the gated ones already return scores.
+    The training loop feeds the raw forward pass to the loss, not ``logits``, because
+    snntorch's rate losses do their own reduction over the time axis.
+    """
+
+    build: Callable[[int, int, "ExperimentConfig"], nn.Module]
+    make_loss: Callable[[], Callable[..., torch.Tensor]]
+    logits: Callable[[nn.Module, torch.Tensor], torch.Tensor]
+
+
+MODEL_SPECS: Dict[str, ModelSpec] = {
+    "rnn": ModelSpec(
+        build=lambda input_size, hidden, config: ClassicRNN(
+            input_size=input_size, hidden_size=hidden
+        ),
+        make_loss=nn.CrossEntropyLoss,
+        logits=lambda model, inputs: model(inputs),
+    ),
+    "snn": ModelSpec(
+        build=lambda input_size, hidden, config: SpikingNet(
+            input_size=input_size,
+            hidden_size=hidden,
+            beta=config.beta,
+            learn_beta=config.learn_beta,
+        ),
+        make_loss=SF.ce_rate_loss,
+        logits=lambda model, inputs: model(inputs).sum(dim=0),
+    ),
+    "lstm": ModelSpec(
+        build=lambda input_size, hidden, config: ClassicLSTM(
+            input_size=input_size, hidden_size=hidden
+        ),
+        make_loss=nn.CrossEntropyLoss,
+        logits=lambda model, inputs: model(inputs),
+    ),
+    # Appended last on purpose: MODEL_SPECS order is RNG-consumption order, so adding the
+    # recurrent spiking control here leaves the other three models' numbers untouched.
+    "rsnn": ModelSpec(
+        build=lambda input_size, hidden, config: SpikingRNN(
+            input_size=input_size,
+            hidden_size=hidden,
+            beta=config.beta,
+            learn_beta=config.learn_beta,
+        ),
+        make_loss=SF.ce_rate_loss,
+        logits=lambda model, inputs: model(inputs).sum(dim=0),
+    ),
+}
+
+# Declaration order is construction order, and construction order consumes the seeded RNG,
+# so appending to MODEL_SPECS is safe but reordering it changes every number.
+MODEL_KINDS = tuple(MODEL_SPECS)
+
+# The families whose membrane decay beta is a real hyperparameter. Experiment 2 sweeps beta,
+# which has no analogue in a gated model, so its sweep points train only these -- the gated
+# models still appear in every exp2 table and figure, as reference lines from the baseline
+# block rather than as ten discarded retrainings per language.
+SPIKING_KINDS = ("snn", "rsnn")
 
 
 @dataclass(frozen=True)
@@ -33,13 +100,22 @@ class ExperimentConfig:
     test_pairs: int = 100
     train_min_n: int = 1
     train_max_n: int = 10
+    train_max_word_len: int | None = None
     test_min_n: int = 1
     test_max_n: int = 80
     hidden_size: int = 32
+    # Which model families this run trains. Defaults to all of them; an experiment that
+    # sweeps a factor only some families have narrows it, and the roster actually trained
+    # is recorded in every output file so a narrowed run cannot be mistaken for a full one.
+    models: Tuple[str, ...] = MODEL_KINDS
+    match_capacity: bool = False
     beta: float = 0.85
     learn_beta: bool = True
     lr: float = 0.01
     epochs: int = 5
+    val_fraction: float = 0.1
+    patience: int = 3
+    grad_clip: float | None = 1.0
     seed: int = 42
     device: str | None = None
     language: str = "anbn"
@@ -51,33 +127,28 @@ class ExperimentConfig:
     pairs_per_difficulty_cell: int = 5
     difficulty_min_n: int = 1
     difficulty_max_n: int = 10
+    difficulty_min_word_len: int | None = None
+    difficulty_max_word_len: int | None = None
 
 
 @dataclass(frozen=True)
 class ExperimentResults:
     device: str
     history: Dict[str, List[float]]
-    rnn_accuracy: float
-    snn_accuracy: float
-    lstm_accuracy: float
-    rnn_accuracy_by_length: Dict[int, float]
-    snn_accuracy_by_length: Dict[int, float]
-    lstm_accuracy_by_length: Dict[int, float]
-    rnn_accuracy_by_bucket: Dict[str, float] = field(default_factory=dict)
-    snn_accuracy_by_bucket: Dict[str, float] = field(default_factory=dict)
-    lstm_accuracy_by_bucket: Dict[str, float] = field(default_factory=dict)
-    rnn_hard_neg_accuracy: float | None = None
-    rnn_easy_neg_accuracy: float | None = None
-    snn_hard_neg_accuracy: float | None = None
-    snn_easy_neg_accuracy: float | None = None
-    lstm_hard_neg_accuracy: float | None = None
-    lstm_easy_neg_accuracy: float | None = None
-    rnn_strategy_neg_accuracy: Dict[int, float] = field(default_factory=dict)
-    snn_strategy_neg_accuracy: Dict[int, float] = field(default_factory=dict)
-    lstm_strategy_neg_accuracy: Dict[int, float] = field(default_factory=dict)
+    # Every per-model field below is keyed by model kind, so adding a model is a
+    # MODEL_SPECS entry rather than a new field on each of these.
+    accuracy: Dict[str, float]
+    accuracy_by_length: Dict[str, Dict[int, float]]
+    models: Tuple[str, ...] = MODEL_KINDS
+    accuracy_by_bucket: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    # [kind]["hard"|"easy"] -> accuracy on that difficulty's negatives, or None if absent.
+    difficulty_accuracy: Dict[str, Dict[str, float | None]] = field(default_factory=dict)
+    strategy_neg_accuracy: Dict[str, Dict[int, float]] = field(default_factory=dict)
     difficulty_counts: Dict[str, int] = field(default_factory=dict)
     strategy_counts: Dict[int, int] = field(default_factory=dict)
     compute_budget: Dict[str, int] = field(default_factory=dict)
+    epochs_trained: Dict[str, int] = field(default_factory=dict)
+    model_capacity: Dict[str, Dict[str, int]] = field(default_factory=dict)
     output_path: str | None = None
 
 
@@ -109,18 +180,8 @@ def _device_name(config: ExperimentConfig) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def _predict_snn(model: SpikingNet, inputs: torch.Tensor) -> torch.Tensor:
-    return model(inputs).sum(dim=0)
-
-
-def _predict(model, inputs: torch.Tensor, model_kind: str) -> int | float | bool | Any:
-    if model_kind == "rnn":
-        return model(inputs).argmax(dim=1).item()
-    if model_kind == "snn":
-        return _predict_snn(model, inputs).argmax(dim=1).item()
-    if model_kind == "lstm":
-        return model(inputs).argmax(dim=1).item()
-    raise ValueError(f"Unknown model_kind: {model_kind}")
+def _predict(model, inputs: torch.Tensor, model_kind: str) -> int:
+    return MODEL_SPECS[model_kind].logits(model, inputs).argmax(dim=1).item()
 
 
 def _accuracy(model, dataset: List[Sample], device: torch.device, model_kind: str, alphabet) -> float:
@@ -140,7 +201,10 @@ def _accuracy_by_length(model, dataset, device, model_kind, alphabet) -> Dict[in
     model.eval()
     with torch.no_grad():
         for sample in dataset:
-            n = max(sample.a_count, sample.b_count)
+            # Key on the realised length, matching _accuracy_by_bucket. Keying on the
+            # generator's n instead made the two disagree for reber (length 2n +/- 2) and
+            # for every negative whose mutation changes length.
+            n = len(sample.word)
             inputs = word_to_tensor(sample.word, alphabet=alphabet).to(device)
             pred = _predict(model, inputs, model_kind)
             buckets[n][1] += 1
@@ -204,6 +268,8 @@ def _build_test_data(config: ExperimentConfig, seed: int) -> List[Sample]:
             language=config.language,
             min_n=config.difficulty_min_n,
             max_n=config.difficulty_max_n,
+            min_word_len=config.difficulty_min_word_len,
+            max_word_len=config.difficulty_max_word_len,
         )
     if config.stratified_test:
         return generate_stratified_dataset(
@@ -232,27 +298,19 @@ def _write_experiment_record(config, results, alphabet, output_dir) -> str | Non
         "language": config.language,
         "alphabet": list(alphabet),
         "device": results.device,
-        "models": list(MODEL_KINDS),
+        "models": list(results.models),
+        "model_capacity": results.model_capacity,
         "config": config_to_dict(config),
         "history": results.history,
-        "test_accuracy": {
-            kind: getattr(results, f"{kind}_accuracy") for kind in MODEL_KINDS
-        },
-        "accuracy_by_length": {
-            kind: getattr(results, f"{kind}_accuracy_by_length") for kind in MODEL_KINDS
-        },
-        "accuracy_by_bucket": {
-            kind: getattr(results, f"{kind}_accuracy_by_bucket") for kind in MODEL_KINDS
-        },
+        "test_accuracy": results.accuracy,
+        "accuracy_by_length": results.accuracy_by_length,
+        "accuracy_by_bucket": results.accuracy_by_bucket,
         "difficulty_accuracy": {
-            f"{kind}_{diff}": getattr(results, f"{kind}_{diff}_neg_accuracy")
-            for kind in MODEL_KINDS
+            f"{kind}_{diff}": results.difficulty_accuracy[kind][diff]
+            for kind in results.models
             for diff in ("hard", "easy")
         },
-        "strategy_accuracy": {
-            kind: getattr(results, f"{kind}_strategy_neg_accuracy")
-            for kind in MODEL_KINDS
-        },
+        "strategy_accuracy": results.strategy_neg_accuracy,
         "difficulty_counts": results.difficulty_counts,
         "strategy_counts": results.strategy_counts,
         "compute_budget": results.compute_budget,
@@ -283,6 +341,7 @@ def run_experiment(config: ExperimentConfig, *, verbose: bool = True) -> Experim
         config.train_max_n,
         seed=config.seed,
         language=config.language,
+        max_word_len=config.train_max_word_len,
     )
     test_data = _build_test_data(config, config.seed + 1)
 
@@ -290,107 +349,151 @@ def run_experiment(config: ExperimentConfig, *, verbose: bool = True) -> Experim
         print(f"  training ({_format_run_header(config)})...", flush=True)
 
     input_size = len(alphabet)
-    rnn_model = ClassicRNN(input_size=input_size, hidden_size=config.hidden_size).to(device)
-    snn_model = SpikingNet(
-        input_size=input_size,
-        hidden_size=config.hidden_size,
-        beta=config.beta,
-        learn_beta=config.learn_beta,
-    ).to(device)
-    lstm_model = ClassicLSTM(
-        input_size=input_size,
-        hidden_size=config.hidden_size,
-    ).to(device)
+    # At a shared hidden size the GRU carries ~28x the SNN's parameters, by a factor that
+    # itself varies with alphabet size -- so capacity differs both between models and
+    # between languages. match_capacity instead equalises the parameter budget against the
+    # GRU at config.hidden_size, leaving architecture as the only remaining difference.
+    roster = tuple(config.models)
+    unknown = [kind for kind in roster if kind not in MODEL_SPECS]
+    if unknown:
+        raise ValueError(
+            f"Unknown model kind(s) {unknown}; known kinds are {list(MODEL_SPECS)}"
+        )
+    if config.match_capacity:
+        hidden = matched_hidden_sizes(input_size, "rnn", config.hidden_size)
+    else:
+        hidden = {kind: config.hidden_size for kind in roster}
 
-    optimizer_rnn = torch.optim.Adam(rnn_model.parameters(), lr=config.lr)
-    optimizer_snn = torch.optim.Adam(snn_model.parameters(), lr=config.lr)
-    optimizer_lstm = torch.optim.Adam(lstm_model.parameters(), lr=config.lr)
-    loss_rnn_fn = nn.CrossEntropyLoss()
-    loss_snn_fn = SF.ce_rate_loss()
-    loss_lstm_fn = nn.CrossEntropyLoss()
-    history: Dict[str, List[float]] = {"rnn_loss": [], "snn_loss": [], "lstm_loss": []}
+    models = {
+        kind: MODEL_SPECS[kind].build(input_size, hidden[kind], config).to(device)
+        for kind in roster
+    }
+    model_capacity = {
+        "hidden_size": {kind: hidden[kind] for kind in roster},
+        "parameters": {kind: count_parameters(models[kind]) for kind in roster},
+    }
+
+    optimizers = {k: torch.optim.Adam(m.parameters(), lr=config.lr) for k, m in models.items()}
+    losses = {k: MODEL_SPECS[k].make_loss() for k in models}
+    history: Dict[str, List[float]] = {f"{k}_loss": [] for k in models}
+
+    # Hold out a validation slice for early stopping. It is drawn from the training set, so it
+    # shares the training length range -- stopping must never be able to see the extrapolation
+    # regime it will later be tested on. train_data is already shuffled and class-balanced.
+    val_size = int(len(train_data) * config.val_fraction) if config.val_fraction > 0 else 0
+    val_data = train_data[:val_size]
+    fit_data = train_data[val_size:] if val_size else train_data
+
+    # Every model gets the same optimiser, learning rate, gradient clip, epoch cap and patience;
+    # only the epoch each one *stops* at differs, and that is recorded and reported. Training all
+    # models for a fixed number of epochs instead would leave the baselines open to the charge of
+    # being undertrained, which is the objection this exists to close.
+    best_state = {k: None for k in models}
+    best_val = {k: -1.0 for k in models}
+    stale = {k: 0 for k in models}
+    epochs_trained = {k: 0 for k in models}
+    active = [k for k in roster]
 
     for epoch in range(1, config.epochs + 1):
-        rnn_model.train()
-        snn_model.train()
-        lstm_model.train()
-        rnn_loss_total = 0.0
-        snn_loss_total = 0.0
-        lstm_loss_total = 0.0
-        for sample in train_data:
+        if not active:
+            break
+        for kind in active:
+            models[kind].train()
+        totals = {k: 0.0 for k in models}
+        for sample in fit_data:
             inputs = word_to_tensor(sample.word, alphabet=alphabet).to(device)
             targets = torch.tensor([sample.label], dtype=torch.long, device=device)
+            for kind in active:
+                optimizers[kind].zero_grad()
+                loss = losses[kind](models[kind](inputs), targets)
+                loss.backward()
+                if config.grad_clip:
+                    nn.utils.clip_grad_norm_(models[kind].parameters(), config.grad_clip)
+                optimizers[kind].step()
+                totals[kind] += loss.item()
 
-            optimizer_rnn.zero_grad()
-            loss_rnn = loss_rnn_fn(rnn_model(inputs), targets)
-            loss_rnn.backward()
-            optimizer_rnn.step()
-            rnn_loss_total += loss_rnn.item()
-
-            optimizer_snn.zero_grad()
-            loss_snn = loss_snn_fn(snn_model(inputs), targets)
-            loss_snn.backward()
-            optimizer_snn.step()
-            snn_loss_total += loss_snn.item()
-
-            optimizer_lstm.zero_grad()
-            loss_lstm = loss_lstm_fn(lstm_model(inputs), targets)
-            loss_lstm.backward()
-            optimizer_lstm.step()
-            lstm_loss_total += loss_lstm.item()
-
-        history["rnn_loss"].append(rnn_loss_total / len(train_data))
-        history["snn_loss"].append(snn_loss_total / len(train_data))
-        history["lstm_loss"].append(lstm_loss_total / len(train_data))
-        if verbose:
-            print(
-                f"    epoch {epoch}/{config.epochs}  "
-                f"rnn={history['rnn_loss'][-1]:.4f}  "
-                f"snn={history['snn_loss'][-1]:.4f}  "
-                f"lstm={history['lstm_loss'][-1]:.4f}",
-                flush=True,
+        for kind in models:
+            history[f"{kind}_loss"].append(
+                totals[kind] / len(fit_data) if kind in active else float("nan")
             )
+            if kind not in active:
+                continue
+            epochs_trained[kind] = epoch
+            if not val_data:
+                continue
+            score = _accuracy(models[kind], val_data, device, kind, alphabet)
+            if score > best_val[kind]:
+                best_val[kind] = score
+                best_state[kind] = {
+                    name: tensor.detach().clone()
+                    for name, tensor in models[kind].state_dict().items()
+                }
+                stale[kind] = 0
+            else:
+                stale[kind] += 1
+        active = [k for k in active if stale[k] <= config.patience]
 
-    rnn_acc = _accuracy(rnn_model, test_data, device, "rnn", alphabet)
-    snn_acc = _accuracy(snn_model, test_data, device, "snn", alphabet)
-    lstm_acc = _accuracy(lstm_model, test_data, device, "lstm", alphabet)
+        if verbose:
+            cells = "  ".join(
+                f"{k}={history[f'{k}_loss'][-1]:.4f}"
+                + (f"/{best_val[k]:.2f}" if val_data and best_val[k] >= 0 else "")
+                for k in models
+            )
+            print(f"    epoch {epoch}/{config.epochs}  {cells}", flush=True)
+
+    # Evaluate the best checkpoint, not the last one -- otherwise patience epochs of
+    # overfitting past the optimum are what gets reported.
+    for kind, state in best_state.items():
+        if state is not None:
+            models[kind].load_state_dict(state)
+
+    accuracy = {
+        kind: _accuracy(models[kind], test_data, device, kind, alphabet) for kind in roster
+    }
 
     if verbose:
         print(
-            f"  eval  rnn={rnn_acc:.1%}  snn={snn_acc:.1%}  lstm={lstm_acc:.1%}",
+            "  eval  " + "  ".join(f"{k}={accuracy[k]:.1%}" for k in roster),
             flush=True,
         )
 
     difficulty_counts, strategy_counts = _difficulty_and_strategy_counts(test_data)
     results = ExperimentResults(
+        models=tuple(roster),
+        model_capacity=model_capacity,
         device=str(device),
         history=history,
-        rnn_accuracy=rnn_acc,
-        snn_accuracy=snn_acc,
-        lstm_accuracy=lstm_acc,
-        rnn_accuracy_by_length=_accuracy_by_length(rnn_model, test_data, device, "rnn", alphabet),
-        snn_accuracy_by_length=_accuracy_by_length(snn_model, test_data, device, "snn", alphabet),
-        lstm_accuracy_by_length=_accuracy_by_length(lstm_model, test_data, device, "lstm", alphabet),
-        rnn_accuracy_by_bucket=_accuracy_by_bucket(rnn_model, test_data, device, "rnn", alphabet),
-        snn_accuracy_by_bucket=_accuracy_by_bucket(snn_model, test_data, device, "snn", alphabet),
-        lstm_accuracy_by_bucket=_accuracy_by_bucket(lstm_model, test_data, device, "lstm", alphabet),
-        rnn_hard_neg_accuracy=_accuracy_by_difficulty(rnn_model, test_data, device, "rnn", alphabet, "hard"),
-        rnn_easy_neg_accuracy=_accuracy_by_difficulty(rnn_model, test_data, device, "rnn", alphabet, "easy"),
-        snn_hard_neg_accuracy=_accuracy_by_difficulty(snn_model, test_data, device, "snn", alphabet, "hard"),
-        snn_easy_neg_accuracy=_accuracy_by_difficulty(snn_model, test_data, device, "snn", alphabet, "easy"),
-        lstm_hard_neg_accuracy=_accuracy_by_difficulty(lstm_model, test_data, device, "lstm", alphabet, "hard"),
-        lstm_easy_neg_accuracy=_accuracy_by_difficulty(lstm_model, test_data, device, "lstm", alphabet, "easy"),
-        rnn_strategy_neg_accuracy=_accuracy_by_strategy(rnn_model, test_data, device, "rnn", alphabet),
-        snn_strategy_neg_accuracy=_accuracy_by_strategy(snn_model, test_data, device, "snn", alphabet),
-        lstm_strategy_neg_accuracy=_accuracy_by_strategy(lstm_model, test_data, device, "lstm", alphabet),
+        accuracy=accuracy,
+        accuracy_by_length={
+            kind: _accuracy_by_length(models[kind], test_data, device, kind, alphabet)
+            for kind in roster
+        },
+        accuracy_by_bucket={
+            kind: _accuracy_by_bucket(models[kind], test_data, device, kind, alphabet)
+            for kind in roster
+        },
+        difficulty_accuracy={
+            kind: {
+                diff: _accuracy_by_difficulty(
+                    models[kind], test_data, device, kind, alphabet, diff
+                )
+                for diff in ("hard", "easy")
+            }
+            for kind in roster
+        },
+        strategy_neg_accuracy={
+            kind: _accuracy_by_strategy(models[kind], test_data, device, kind, alphabet)
+            for kind in roster
+        },
         difficulty_counts=difficulty_counts,
         strategy_counts=strategy_counts,
+        epochs_trained=epochs_trained,
         compute_budget={
-            "epochs": config.epochs,
-            "train_samples_per_epoch": len(train_data),
+            "epoch_cap": config.epochs,
+            "train_samples_per_epoch": len(fit_data),
+            "validation_samples": len(val_data),
             "test_samples": len(test_data),
-            "updates_per_model": config.epochs * len(train_data),
-            "total_model_updates": config.epochs * len(train_data) * len(MODEL_KINDS),
+            "total_model_updates": sum(epochs_trained.values()) * len(fit_data),
         },
     )
     output_path = _write_experiment_record(config, results, alphabet, config.output_dir)
@@ -399,12 +502,12 @@ def run_experiment(config: ExperimentConfig, *, verbose: bool = True) -> Experim
 
 def _result_to_dict(results: ExperimentResults, *, seed: int) -> Dict[str, Any]:
     record: Dict[str, Any] = {"seed": seed}
-    for kind in MODEL_KINDS:
-        record[f"{kind}_accuracy"] = getattr(results, f"{kind}_accuracy")
-        record[f"{kind}_accuracy_by_bucket"] = getattr(results, f"{kind}_accuracy_by_bucket")
+    for kind in results.models:
+        record[f"{kind}_accuracy"] = results.accuracy[kind]
+        record[f"{kind}_accuracy_by_bucket"] = results.accuracy_by_bucket[kind]
         for diff in ("hard", "easy"):
-            record[f"{kind}_{diff}_neg_accuracy"] = getattr(results, f"{kind}_{diff}_neg_accuracy")
-        for strategy, score in getattr(results, f"{kind}_strategy_neg_accuracy").items():
+            record[f"{kind}_{diff}_neg_accuracy"] = results.difficulty_accuracy[kind][diff]
+        for strategy, score in results.strategy_neg_accuracy[kind].items():
             record[f"{kind}_strategy_{strategy}_neg_accuracy"] = score
     for difficulty, count in results.difficulty_counts.items():
         record[f"difficulty_{difficulty}_count"] = float(count)
@@ -497,14 +600,17 @@ def _build_inference_stats(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     for key in _aggregate_metric_keys(records):
         ci_metrics[key] = _mean_std_ci(_safe_float_list(records, key))
 
+    # Every ordered-by-roster pair of models, on every metric -- not just the SNN against the
+    # two baselines. Reporting only the comparisons involving one model leaves a reviewer
+    # unable to check whether the baselines differ from each other, and it understates the
+    # Holm family, which makes the surviving p-values look stronger than they are.
+    kinds = _record_model_kinds(records)
     comparisons: List[Dict[str, Any]] = []
     comparison_specs: List[Tuple[str, str, str]] = [
-        ("overall", "snn", "rnn"),
-        ("overall", "snn", "lstm"),
+        (metric, lhs, rhs)
+        for metric in ("overall", "hard", "easy")
+        for lhs, rhs in combinations(kinds, 2)
     ]
-    for difficulty in ("hard", "easy"):
-        comparison_specs.append((difficulty, "snn", "rnn"))
-        comparison_specs.append((difficulty, "snn", "lstm"))
 
     raw_p_values: List[float] = []
     for metric, lhs, rhs in comparison_specs:
@@ -543,7 +649,19 @@ def _build_inference_stats(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {
         "confidence_intervals": ci_metrics,
         "paired_comparisons": comparisons,
-        "multiple_comparisons": {"method": "holm_bonferroni"},
+        # The Holm family is stated explicitly so the correction can be reported, and
+        # audited, rather than inferred from the length of the list above.
+        "multiple_comparisons": {
+            "method": "holm_bonferroni",
+            "family_size": len(raw_p_values),
+            "family": (
+                "all unordered model pairs x {overall, hard, easy} negatives, "
+                "within one language's seed block"
+            ),
+            "models": list(kinds),
+            "metrics": ["overall", "hard", "easy"],
+            "test": "two-sided exact sign test over paired seeds",
+        },
     }
 
 
@@ -558,18 +676,32 @@ def _aggregate_metric_keys(records: List[Dict[str, Any]]) -> List[str]:
     return sorted(keys)
 
 
+def _record_model_kinds(records: List[Dict[str, Any]]) -> Tuple[str, ...]:
+    """Model kinds present in these seed records, in MODEL_SPECS order."""
+    present = {
+        key[: -len("_accuracy_by_bucket")]
+        for record in records
+        for key in record
+        if key.endswith("_accuracy_by_bucket")
+    }
+    return tuple(kind for kind in MODEL_SPECS if kind in present)
+
+
 def aggregate_results(records: List[Dict[str, Any]]) -> AggregatedResults:
     metrics: Dict[str, Dict[str, float]] = {}
     for key in _aggregate_metric_keys(records):
         stats = _mean_std([r.get(key) for r in records if r.get(key) is not None])
         metrics[key] = stats
 
+    # Read the roster back off the records rather than assuming MODEL_KINDS, so aggregating
+    # a narrowed run does not invent empty rows for models it never trained.
+    kinds = _record_model_kinds(records)
     bucket_keys = set()
     for record in records:
-        for kind in MODEL_KINDS:
+        for kind in kinds:
             bucket_keys.update(record.get(f"{kind}_accuracy_by_bucket", {}).keys())
     for bucket in sorted(bucket_keys):
-        for kind in MODEL_KINDS:
+        for kind in kinds:
             metrics[f"{kind}_bucket_{bucket}"] = _mean_std(
                 [r.get(f"{kind}_accuracy_by_bucket", {}).get(bucket) for r in records]
             )
@@ -600,7 +732,7 @@ def build_seedagg_payload(
         "language": config.language,
         "num_seeds": num_seeds,
         "seed_base": seed_base,
-        "models": list(MODEL_KINDS),
+        "models": list(config.models),
         "config": config_to_dict(config),
         "metrics": agg.metrics,
         "counts": agg.counts,

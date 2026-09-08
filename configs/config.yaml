@@ -9,14 +9,18 @@ experiment:
   pairs_per_difficulty_cell: 5
 
 training:
-  train_pairs: 500
+  train_pairs: 1500
   test_pairs: 250
   train_min_n: 1
-  train_max_n: 100
+  train_max_n: 20
+  train_max_word_len: 40
   test_min_n: 1
-  test_max_n: 200
-  epochs: 5
-  learning_rate: 0.01
+  test_max_n: 80
+  epochs: 30
+  learning_rate: 0.001
+  val_fraction: 0.1
+  patience: 4
+  grad_clip: 1.0
   seed: 42
 
 model:

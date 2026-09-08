@@ -6,15 +6,20 @@ experiment:
   pairs_per_bucket: 50
 
 training:
-  train_pairs: 500
+  train_pairs: 1500
   train_min_n: 1
-  train_max_n: 100
-  epochs: 7
-  learning_rate: 0.01
+  train_max_n: 20
+  train_max_word_len: 40
+  epochs: 30
+  learning_rate: 0.001
+  val_fraction: 0.1
+  patience: 4
+  grad_clip: 1.0
   seed: 42
 
 model:
   hidden_size: 32
+  match_capacity: true
   beta: 0.85
   learn_beta: true
 

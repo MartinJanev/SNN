@@ -34,9 +34,11 @@ def main() -> None:
     parser.add_argument("--seed-base", type=int, default=42)
     parser.add_argument("--pilot", action="store_true")
     parser.add_argument("--plot", action="store_true")
-    parser.add_argument("--run-extrapolation", action="store_true")
-    parser.add_argument("--extrapolation-min-n", type=int, default=11)
-    parser.add_argument("--extrapolation-max-n", type=int, default=40)
+    # Both regimes run by default: an opt-in flag meant the default invocation silently
+    # produced half the coverage matrix, which is indistinguishable from a complete run.
+    parser.add_argument("--skip-extrapolation", action="store_true")
+    parser.add_argument("--extrapolation-min-n", type=int, default=41)
+    parser.add_argument("--extrapolation-max-n", type=int, default=80)
     parser.add_argument(
         "--sensitivity-hidden-sizes",
         default=None,
@@ -50,9 +52,18 @@ def main() -> None:
     out_root = PROJECT_ROOT / "outputs/experiments/exp3_difficulty"
     out_root.mkdir(parents=True, exist_ok=True)
 
-    regimes: list[tuple[str, int, int]] = [("in_range", base_config.difficulty_min_n, base_config.difficulty_max_n)]
-    if args.run_extrapolation:
-        regimes.append(("extrapolation", args.extrapolation_min_n, args.extrapolation_max_n))
+    # The regime is defined by realised word length, not by n: "in_range" must contain only
+    # words the model could have trained on, "extrapolation" only words it could not. The
+    # training cap is the boundary, so the two regimes cannot overlap.
+    cap = base_config.train_max_word_len
+    regimes: list[tuple[str, int, int, int | None, int | None]] = [
+        ("in_range", base_config.difficulty_min_n, base_config.difficulty_max_n, None, cap)
+    ]
+    if not args.skip_extrapolation:
+        lower = cap + 1 if cap is not None else None
+        regimes.append(
+            ("extrapolation", args.extrapolation_min_n, args.extrapolation_max_n, lower, None)
+        )
 
     training_blocks = ["main", "control_fixed_beta"]
     training_blocks.extend(f"sensitivity_hidden_{hidden_size}" for hidden_size in sensitivity_sizes)
@@ -66,8 +77,9 @@ def main() -> None:
     seedagg_paths: list[Path] = []
     for language in args.languages:
         print(f"=== exp3 {language} ({num_seeds} seeds) ===", flush=True)
-        for regime_name, min_n, max_n in regimes:
-            print(f"  regime={regime_name} n={min_n}-{max_n}", flush=True)
+        for regime_name, min_n, max_n, min_len, max_len in regimes:
+            bound = f" len<={max_len}" if max_len else (f" len>{min_len - 1}" if min_len else "")
+            print(f"  regime={regime_name} n={min_n}-{max_n}{bound}", flush=True)
             config = replace(
                 base_config,
                 language=language,
@@ -75,6 +87,8 @@ def main() -> None:
                 difficulty_test=True,
                 difficulty_min_n=min_n,
                 difficulty_max_n=max_n,
+                difficulty_min_word_len=min_len,
+                difficulty_max_word_len=max_len,
             )
             print("  block=main", flush=True)
             records = run_multiseed_experiment(config, num_seeds, args.seed_base)

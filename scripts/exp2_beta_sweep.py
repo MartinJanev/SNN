@@ -16,7 +16,12 @@ from formal_language_snn.cli import config_from_dict, load_config
 from formal_language_snn.data import EXPERIMENT_LANGUAGES
 from formal_language_snn.paths import PROJECT_ROOT
 from formal_language_snn.plotting import plot_exp2_seedagg_files
-from formal_language_snn.training import aggregate_results, build_seedagg_payload, run_multiseed_experiment
+from formal_language_snn.training import (
+    SPIKING_KINDS,
+    aggregate_results,
+    build_seedagg_payload,
+    run_multiseed_experiment,
+)
 
 DEFAULT_BETAS = [i * 0.1 for i in range(1, 11)]  # 0.1, 0.2, ..., 1.0
 
@@ -41,26 +46,31 @@ def main() -> None:
     for language in args.languages:
         print(f"=== exp2 {language}: baseline ({num_seeds} seeds) ===", flush=True)
         config = replace(base_config, language=language)
-        rnn_config = replace(config, learn_beta=True)
-        rnn_records = run_multiseed_experiment(rnn_config, num_seeds, args.seed_base)
-        rnn_agg = aggregate_results(rnn_records)
+        # The baseline block trains the full roster once. It is what the gated models'
+        # constant reference lines are drawn from, so they stay in every exp2 table and
+        # figure without being retrained at each sweep point, where beta means nothing.
+        baseline_config = replace(config, learn_beta=True)
+        baseline_records = run_multiseed_experiment(baseline_config, num_seeds, args.seed_base)
 
-        metrics = dict(rnn_agg.metrics)
+        metrics = dict(aggregate_results(baseline_records).metrics)
+        swept = ", ".join(SPIKING_KINDS)
         for beta in args.betas:
-            print(f"=== exp2 {language}: snn beta={beta} ({num_seeds} seeds) ===", flush=True)
+            print(f"=== exp2 {language}: {swept} beta={beta} ({num_seeds} seeds) ===", flush=True)
             beta_config = replace(
                 config,
                 beta=beta,
                 learn_beta=False,
+                models=SPIKING_KINDS,
             )
-            snn_records = run_multiseed_experiment(beta_config, num_seeds, args.seed_base)
-            snn_agg = aggregate_results(snn_records)
-            metrics[f"snn_beta_{beta}"] = snn_agg.metrics["snn_accuracy"]
+            sweep_records = run_multiseed_experiment(beta_config, num_seeds, args.seed_base)
+            sweep_metrics = aggregate_results(sweep_records).metrics
+            for kind in SPIKING_KINDS:
+                metrics[f"{kind}_beta_{beta}"] = sweep_metrics[f"{kind}_accuracy"]
 
         payload = build_seedagg_payload(
             experiment="exp2_beta",
             config=config,
-            records=rnn_records,
+            records=baseline_records,
             num_seeds=num_seeds,
             seed_base=args.seed_base,
             betas=args.betas,

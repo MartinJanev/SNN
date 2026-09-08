@@ -27,9 +27,21 @@ EXPERIMENT_DIRS = {
     "exp3": "exp3_difficulty",
 }
 
-MODELS = ("rnn", "snn", "lstm")
-MODEL_LABELS = {"rnn": "RNN", "snn": "SNN", "lstm": "LSTM"}
+MODELS = ("rnn", "snn", "lstm", "rsnn")
+# GRU rather than "RNN": with a recurrent spiking model in the table, "RNN" no longer
+# picks out one row. RSNN is the recurrent spiking control.
+MODEL_LABELS = {"rnn": "GRU", "snn": "SNN", "lstm": "LSTM", "rsnn": "RSNN"}
 BUCKET_LABELS = [f"{lo}-{hi}" for lo, hi in LENGTH_BUCKETS]
+
+
+def fit_to_textwidth(tabular: str) -> str:
+    """Wrap a tabular so a wide one cannot overflow the LNCS text block.
+
+    The per-language x per-model tables are one column per cell, so they grow with the
+    roster: exp1 is 1 + 5 languages x 4 models = 21 columns. \resizebox is what keeps
+    that inside \textwidth without hand-tuning font sizes per table.
+    """
+    return "\\resizebox{\\textwidth}{!}{%\n" + tabular.rstrip("\n") + "\n}\n"
 
 # Paper-facing labels / order for the overall-accuracy stats table.
 PAPER_LANGUAGE_ORDER = ("anbn", "balanced_parens", "palindrome", "reber", "even_a")
@@ -186,7 +198,31 @@ def render_exp1(payloads: list[dict]) -> str:
         lines.append(" & ".join(cells) + r" \\")
 
     lines.extend([r"\bottomrule", r"\end{tabular}"])
-    return "\n".join(lines) + "\n"
+    return lines[0] + "\n" + fit_to_textwidth("\n".join(lines[1:]))
+
+
+def _swept_models(payloads: list[dict]) -> tuple[str, ...]:
+    """Models that carry a beta sweep in these payloads, in canonical MODELS order."""
+    keys = {k for p in payloads for k in p.get("metrics", {})}
+    return tuple(m for m in MODELS if any(k.startswith(f"{m}_beta_") for k in keys))
+
+
+def _beta_stats(metrics: dict, beta: float, model: str) -> dict | None:
+    """Sweep entry for one model at one beta, tolerating float formatting drift in the key."""
+    prefix = f"{model}_beta_"
+    for key in (f"{prefix}{beta}", f"{prefix}{beta:g}", f"{prefix}{beta:.1f}"):
+        stats = _metric(metrics, key)
+        if stats:
+            return stats
+    for mkey, mstats in metrics.items():
+        if not mkey.startswith(prefix):
+            continue
+        try:
+            if abs(float(mkey[len(prefix):]) - beta) < 1e-9:
+                return mstats
+        except ValueError:
+            continue
+    return None
 
 
 def render_exp2(payloads: list[dict]) -> str:
@@ -201,48 +237,41 @@ def render_exp2(payloads: list[dict]) -> str:
                 betas.append(float(b))
     betas = sorted(betas)
 
+    swept = _swept_models(payloads)
+
     lines = [
-        "% Exp2: SNN beta sweep (mean ± std over seeds)",
+        "% Exp2: membrane decay beta sweep (mean ± std over seeds)",
+        "% Gated baselines are constant reference rows: beta has no analogue in them, so they",
+        "% come from the baseline block rather than being retrained at each sweep point.",
         r"\begin{tabular}{" + col_spec + "}",
         r"\toprule",
         " & ".join(["Model / $\\beta$"] + [_language_label(l) for l in languages]) + r" \\",
         r"\midrule",
     ]
 
-    baseline_rows = [
-        ("RNN", "rnn_accuracy"),
-        ("LSTM", "lstm_accuracy"),
-        (r"SNN (learned $\beta$)", "snn_accuracy"),
-    ]
-    for label, key in baseline_rows:
+    # Every model gets a row, swept or not -- that is what keeps the gated baselines in the
+    # table even though only the spiking families have a beta to sweep.
+    for model in MODELS:
+        label = MODEL_LABELS[model]
+        if model in swept:
+            label = rf"{label} (learned $\beta$)"
         cells = [label]
         for payload in payloads:
-            cells.append(fmt_cell(_metric(payload.get("metrics", {}), key)))
+            cells.append(fmt_cell(_metric(payload.get("metrics", {}), f"{model}_accuracy")))
         lines.append(" & ".join(cells) + r" \\")
 
-    if betas:
+    for model in swept:
+        if not betas:
+            break
         lines.append(r"\midrule")
-    for beta in betas:
-        key_candidates = [
-            f"snn_beta_{beta}",
-            f"snn_beta_{beta:g}",
-            f"snn_beta_{beta:.1f}",
-        ]
-        cells = [f"$\\beta={beta:g}$"]
-        for payload in payloads:
-            metrics = payload.get("metrics", {})
-            stats = None
-            for key in key_candidates:
-                stats = _metric(metrics, key)
-                if stats:
-                    break
-            if not stats:
-                for mkey, mstats in metrics.items():
-                    if mkey.startswith("snn_beta_") and abs(float(mkey[len("snn_beta_") :]) - beta) < 1e-9:
-                        stats = mstats
-                        break
-            cells.append(fmt_cell(stats))
-        lines.append(" & ".join(cells) + r" \\")
+        lines.append(
+            rf"\multicolumn{{{len(languages) + 1}}}{{l}}{{\textit{{{MODEL_LABELS[model]}, fixed $\beta$}}}} \\"
+        )
+        for beta in betas:
+            cells = [f"$\\beta={beta:g}$"]
+            for payload in payloads:
+                cells.append(fmt_cell(_beta_stats(payload.get("metrics", {}), beta, model)))
+            lines.append(" & ".join(cells) + r" \\")
 
     lines.extend([r"\bottomrule", r"\end{tabular}"])
     return "\n".join(lines) + "\n"
@@ -311,7 +340,7 @@ def render_exp3_hard_easy(
             lines.append(" & ".join(cells) + r" \\")
 
     lines.extend([r"\bottomrule", r"\end{tabular}"])
-    return "\n".join(lines) + "\n"
+    return lines[0] + "\n" + fit_to_textwidth("\n".join(lines[1:]))
 
 
 def _strategy_ids_for(language: str, metrics: dict) -> list[int]:
@@ -416,13 +445,17 @@ def _ci_for(payload: dict, key: str) -> dict[str, float] | None:
     return payload.get("stats", {}).get("confidence_intervals", {}).get(key)
 
 
-def _overall_comparison(payload: dict, rhs: str) -> dict | None:
+def _overall_comparison(payload: dict, rhs: str, lhs: str = "snn") -> dict | None:
+    """The overall-accuracy comparison for this pair, in whichever order it was stored.
+
+    Comparisons are emitted over unordered model pairs, so the SNN is not always the
+    left-hand side. The sign test is two-sided, so the p-value does not depend on the
+    orientation; only ``delta_mean`` does, and this table does not use it.
+    """
     for comp in payload.get("stats", {}).get("paired_comparisons", []):
-        if (
-            comp.get("metric") == "overall"
-            and comp.get("lhs") == "snn"
-            and comp.get("rhs") == rhs
-        ):
+        if comp.get("metric") != "overall":
+            continue
+        if {comp.get("lhs"), comp.get("rhs")} == {lhs, rhs}:
             return comp
     return None
 
@@ -532,10 +565,11 @@ def render_statistical_accuracy(
     lines = [
         "% Exp3 extrapolation: overall string recognition accuracy (mean ± SD, %)",
         f"% Sign test / Holm: SNN vs {compare_rhs.upper()} overall accuracy across languages",
-        r"\begin{tabular}{lcccccc}",
+        r"\begin{tabular}{l" + "c" * len(MODELS) + r"ccc}",
         r"\toprule",
-        r"\textbf{Language} & \textbf{RNN} & \textbf{LSTM} & \textbf{SNN}"
-        r" & \textbf{95\% CI (SNN)} & \textbf{Sign Test ($p$)} & \textbf{Holm Sign} \\",
+        r"\textbf{Language} & "
+        + " & ".join(rf"\textbf{{{MODEL_LABELS[m]}}}" for m in MODELS)
+        + r" & \textbf{95\% CI (SNN)} & \textbf{Sign Test ($p$)} & \textbf{Holm Sign} \\",
         r"\midrule",
     ]
 
@@ -550,9 +584,7 @@ def render_statistical_accuracy(
             holm_label = "Valid" if p_holm < ALPHA else "N.S."
         cells = [
             PAPER_LANGUAGE_TEX.get(lang, _language_label(lang)),
-            fmt_pct_cell(_metric(metrics, "rnn_accuracy")),
-            fmt_pct_cell(_metric(metrics, "lstm_accuracy")),
-            fmt_pct_cell(_metric(metrics, "snn_accuracy")),
+            *(fmt_pct_cell(_metric(metrics, f"{m}_accuracy")) for m in MODELS),
             fmt_pct_ci(ci),
             fmt_p_value(p_raw),
             holm_label,
