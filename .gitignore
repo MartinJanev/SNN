@@ -6,5 +6,14 @@ __pycache__/
 outputs/
 .matplotlib/
 /logs/
-paper/
-.agents/
+all_contents.txt
+
+# Local working files: kept on disk, deliberately not tracked.
+# The manuscript, the archived run kept for provenance, the long-form docs,
+# and the working notes and command sheet.
+/paper/
+/archive/
+/docs/
+/REVISION.md
+/EXPERIMENT_COMMANDS.md
+/printAllFiles.sh

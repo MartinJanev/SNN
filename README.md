@@ -1,6 +1,6 @@
 # SNN Formal Language Learning
 
-Compare GRU (RNN), LSTM, and Spiking Neural Network (SNN) models as recognizers of formal languages — following the setup in *Training Neural Networks as Recognizers of Formal Languages*.
+Compare GRU (RNN), LSTM, a feedforward Spiking Neural Network (SNN), and a recurrent spiking control (RSNN) as recognizers of formal languages — following the setup in *Training Neural Networks as Recognizers of Formal Languages*.
 
 ## Goal
 
@@ -27,11 +27,19 @@ python scripts/exp2_beta_sweep.py --plot
 python scripts/exp3_difficulty.py --plot
 ```
 
+Before any paper run, the symmetry guard must pass — it enforces that only the factor under study varies across models, languages and runs:
+
+```bash
+python scripts/check_symmetry.py
+```
+
 ## Documentation
 
-- **[docs/EXPERIMENTS.md](docs/EXPERIMENTS.md)** — comprehensive guide to languages, models, data pipeline, and all three structured experiments
+- **[docs/EXPERIMENTS.md](docs/EXPERIMENTS.md)** — comprehensive guide to languages, negative strategies, models, data pipeline, and all three structured experiments
 - **[EXPERIMENT_COMMANDS.md](EXPERIMENT_COMMANDS.md)** — command reference and config cheat sheet
+
 
 ## Utilities
 
-- [`printAllFiles.sh`](printAllFiles.sh) — dump repo source to a text file (skips `.venv`, `outputs`, etc.)
+- [`scripts/combine_exp3_figs.py`](scripts/combine_exp3_figs.py) — stitch the Exp3 panels into the combined paper figure
+- [`printAllFiles.sh`](printAllFiles.sh) — dump repo source to a text file (output is gitignored; it goes stale the moment the code changes, so regenerate rather than reading an old dump)
